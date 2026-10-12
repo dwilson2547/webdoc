@@ -7,3 +7,4 @@ PyJWT[crypto]>=2.8
 mcp>=2.3,<3
 alembic>=1.13,<2
 PyYAML>=6.0,<7
+fastembed>=0.9,<0.10

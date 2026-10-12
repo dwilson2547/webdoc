@@ -9,6 +9,7 @@ creates, renames or deletes a domain (design §5).
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Any, Callable, Literal
 
 from pydantic import Field
@@ -21,8 +22,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import (__version__, access, documents, domains, proposals, sections, styleguide,
-               tags as tagmod, templates, tokens)
+from . import (__version__, access, documents, domains, feed, proposals, search as searching,
+               sections, styleguide, tags as tagmod, templates, tokens)
 from .activity import Actor
 from .config import Settings
 from .db import Database
@@ -45,8 +46,13 @@ the signed-in user who connected you, with their permissions.
   and tags are free text. When you introduce a new tag, check the tag_hints in the reply:
   reuse an existing tag if one means the same thing.
 - Call get_writing_guide before writing: it says how this user likes documents written.
-- Look before you create: list_documents (filter by domain, project, tag or title) to
-  find an existing document and add to it rather than starting a near-duplicate.
+- Look before you create: search (by meaning) for an existing document on the subject and
+  add to it rather than starting a near-duplicate. find looks up exact text (an error
+  message, identifier or part number) wherever it occurs. Both cover everything the user
+  can read; each result says its source (public, personal, shared) and domain.
+- whats_new lists what changed since you last called it (the user's edits in the web UI,
+  other agents). Call it when the user asks what's new or before picking up shared work;
+  nothing calls it for you.
 - Notes are short and atomic (create_note); documents are longer and sectioned
   (create_document).
 - Edit by section with edit_document (replace_section, append_to_section, insert_section,
@@ -63,6 +69,7 @@ the signed-in user who connected you, with their permissions.
 SCHEME = "Bearer"
 RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource/mcp"
 Kind = Literal["note", "document"]
+Source = Literal["public", "personal", "shared"]
 
 
 class McpAuth:
@@ -94,7 +101,7 @@ class McpAuth:
         await self.inner(scope, receive, send)
 
 
-def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
+def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, ASGIApp]:
     server = MCPServer(name="webdoc", version=__version__, instructions=INSTRUCTIONS,
                        website_url=settings.public_url)
     limit = settings.max_document_bytes
@@ -114,7 +121,8 @@ def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
                 raise ToolError(f"{exc}. Read it again and retry, or use edit_document, which "
                                 "applies to the latest revision.") from None
             except (documents.DocError, domains.DomainError, sections.SectionError,
-                    tagmod.TagError, templates.TemplateError, proposals.ProposalError) as exc:
+                    tagmod.TagError, templates.TemplateError, proposals.ProposalError,
+                    searching.SearchError) as exc:
                 raise ToolError(str(exc)) from None
 
     def url(doc_id: str) -> str:
@@ -204,6 +212,100 @@ def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
                                             tag=tag, q=title_contains, trashed=trashed,
                                             limit=limit, offset=offset)
             return {"total": total, "documents": [doc_brief(d) for d in rows]}
+        return run(ctx, go)
+
+    def search_filters(s: Session, user: User, domain: str | None, project: str | None,
+                       kind: str | None, type_: str | None, tags: list[str] | None,
+                       source: str | None, author: str | None,
+                       updated_after: str | None) -> searching.Filters:
+        f = searching.Filters(source=source, kind=kind, type=type_, tags=tags or [],
+                              author=author)
+        if domain:
+            d = find_domain(s, user, domain)
+            f.domain_ids = [d.id]
+            if project:
+                f.project_id = domains.find_project(s, d, project).id
+        elif project:
+            raise ToolError("project needs domain")
+        if updated_after:
+            try:
+                f.updated_after = datetime.fromisoformat(updated_after)
+            except ValueError:
+                raise ToolError("updated_after must be an ISO date, e.g. 2026-10-01") from None
+        return f
+
+    @server.tool()
+    def search(ctx: Context, query: Annotated[str, Field(min_length=1, max_length=500)],
+               domain: str | None = None, project: str | None = None, kind: Kind | None = None,
+               type: str | None = None, tags: list[str] | None = None,
+               source: Source | None = None, author: str | None = None,
+               updated_after: str | None = None,
+               limit: Annotated[int, Field(ge=1, le=50)] = 10) -> dict:
+        """Find documents by meaning across everything you can read: public domains,
+        the user's own and those shared with them. Each result has its source and
+        domain, the best-matching section (heading) and a snippet; get_document with
+        that heading_path reads the section. Filters narrow it: domain (id or slug),
+        project (needs domain), kind, type (document type), tags (all must match),
+        source, author (username), updated_after (ISO date)."""
+        def go(s, user, actor):
+            f = search_filters(s, user, domain, project, kind, type, tags, source, author,
+                               updated_after)
+            emb = indexer.semantic if indexer is not None else None
+            out = searching.search(s, user, emb, query, f, limit=limit)
+            for r in out["results"]:
+                r["url"] = url(r["id"])
+            if not out["semantic"]:
+                out["note"] = "semantic search is unavailable; these are keyword matches"
+            if out["pending"]:
+                out["note_pending"] = (f"{out['pending']} recently changed documents are still "
+                                       "being indexed and may be missing or out of date")
+            return out
+        return run(ctx, go)
+
+    @server.tool()
+    def find(ctx: Context, text: Annotated[str, Field(min_length=1, max_length=200)],
+             whole_word: bool = True, case_sensitive: bool = False,
+             domain: str | None = None, project: str | None = None, kind: Kind | None = None,
+             type: str | None = None, tags: list[str] | None = None,
+             source: Source | None = None, author: str | None = None,
+             updated_after: str | None = None,
+             limit: Annotated[int, Field(ge=1, le=50)] = 20) -> dict:
+        """Literal lookup: every document containing this exact text (an error
+        message, identifier, part number, phrase), with the matching lines, their
+        line numbers and sections. whole_word (default) won't match inside longer
+        words. Same filters as search. No embeddings, so nothing is missed or blurred."""
+        def go(s, user, actor):
+            f = search_filters(s, user, domain, project, kind, type, tags, source, author,
+                               updated_after)
+            out = searching.find(s, user, text, f, whole_word=whole_word,
+                                 case_sensitive=case_sensitive, limit=limit)
+            for r in out["results"]:
+                r["url"] = url(r["id"])
+            return out
+        return run(ctx, go)
+
+    @server.tool()
+    def whats_new(ctx: Context, since: str | None = None, domain: str | None = None,
+                  include_own: bool = False) -> dict:
+        """What changed since you (this app) last called whats_new: documents created,
+        edited, moved or deleted, domain and template changes, proposals decided.
+        Grouped per thing changed, with who changed it and through what. The first
+        call looks back 7 days. Pass since (ISO time) to look from a fixed point
+        without moving your place. include_own adds your own changes."""
+        def go(s, user, actor):
+            start = None
+            if since:
+                try:
+                    start = datetime.fromisoformat(since)
+                except ValueError:
+                    raise ToolError("since must be an ISO time, e.g. 2026-10-01T09:00") from None
+            did = find_domain(s, user, domain).id if domain else None
+            out = feed.whats_new(s, user, actor.client, since=start, domain_id=did,
+                                 include_own=include_own)
+            for c in out["changes"]:
+                if c["target_kind"] == "document" and c["exists"]:
+                    c["url"] = url(c["target_id"])
+            return out
         return run(ctx, go)
 
     @server.tool()

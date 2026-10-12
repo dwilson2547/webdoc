@@ -11,9 +11,10 @@ import contextlib
 import logging
 import os
 import re
+from datetime import datetime
 from urllib.parse import quote, urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
@@ -22,8 +23,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.routing import Route
 
-from . import (__version__, access, auth, documents, domains, export, mcp_server, oauth, oidc,
-               proposals, sections, styleguide, tags as tagmod, templates, tokens)
+from . import (__version__, access, auth, documents, domains, embeddings, export, feed,
+               indexer as indexing, mcp_server, oauth, oidc, proposals, search, sections,
+               styleguide, tags as tagmod, templates, tokens)
 from .activity import Actor
 from .config import Settings
 from .db import Database
@@ -141,16 +143,22 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         log.warning("DEV_LOGIN ignored: PUBLIC_URL is https")
     limit = settings.max_document_bytes
 
-    mcp, mcp_app = mcp_server.build(db, settings)
+    indexer = indexing.Indexer(db, embeddings.make(settings))
+    mcp, mcp_app = mcp_server.build(db, settings, indexer)
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
-        async with mcp.session_manager.run():
-            yield
+        if settings.background_index:
+            indexer.start()
+        try:
+            async with mcp.session_manager.run():
+                yield
+        finally:
+            indexer.stop()
 
     app = FastAPI(title="webdoc", version=__version__, docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=lifespan)
-    app.state.settings, app.state.db = settings, db
+    app.state.settings, app.state.db, app.state.indexer = settings, db, indexer
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -185,7 +193,8 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         except documents.Conflict as exc:
             raise HTTPException(409, {"message": str(exc), "current": exc.current}) from None
         except (documents.DocError, domains.DomainError, sections.SectionError,
-                tagmod.TagError, templates.TemplateError, proposals.ProposalError) as exc:
+                tagmod.TagError, templates.TemplateError, proposals.ProposalError,
+                search.SearchError) as exc:
             raise HTTPException(422, str(exc)) from None
 
     # --- meta and auth ------------------------------------------------------
@@ -279,6 +288,40 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                    else "personal" if user is not None and d.owner_user_id == user.id else "shared")
             groups[key].append(domains.out(s, d, user, stats))
         return groups
+
+    # --- search and activity -------------------------------------------------
+
+    def filters(source: str | None = None, domain_id: list[str] = Query([]),
+                project_id: str | None = None, kind: str | None = None, type: str | None = None,
+                tag: list[str] = Query([]), author: str | None = None,
+                updated_after: datetime | None = None,
+                updated_before: datetime | None = None) -> search.Filters:
+        return search.Filters(source=source or None, domain_ids=domain_id or None,
+                              project_id=project_id or None, kind=kind or None,
+                              type=type or None, tags=tag or [], author=author or None,
+                              updated_after=updated_after, updated_before=updated_before)
+
+    @app.get("/api/search")
+    def run_search(q: str = Query(min_length=1, max_length=500),
+                   mode: str = Query("semantic", pattern="^(semantic|find)$"),
+                   whole_word: bool = True, case_sensitive: bool = False,
+                   limit: int = Query(20, ge=1, le=100),
+                   f: search.Filters = Depends(filters), user: User | None = Depends(maybe_user),
+                   s: Session = Depends(session)):
+        """Everything the caller can read (design §8, §11): semantic search, or
+        find for literal text."""
+        if mode == "find":
+            return guard(search.find, s, user, q, f, whole_word=whole_word,
+                         case_sensitive=case_sensitive, limit=limit)
+        out = guard(search.search, s, user, indexer.semantic, q, f, limit=limit)
+        out["index_error"] = indexer.error
+        return out
+
+    @app.get("/api/activity")
+    def activity(domain_id: str | None = None, before: datetime | None = None,
+                 limit: int = Query(50, ge=1, le=200), user: User | None = Depends(maybe_user),
+                 s: Session = Depends(session)):
+        return guard(feed.feed, s, user, domain_id=domain_id, before=before, limit=limit)
 
     @app.post("/api/domains", status_code=201)
     def create_domain(body: DomainIn, user: User = Depends(user_dep), s: Session = Depends(session)):

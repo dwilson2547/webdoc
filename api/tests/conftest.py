@@ -1,4 +1,6 @@
 import json
+import os
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -33,11 +35,30 @@ class FakeProvider(oidc.Provider):
 
 
 @pytest.fixture
-def settings(tmp_path):
-    return Settings(database_url=f"sqlite:///{tmp_path}/t.db", public_url="http://testserver",
+def database_url(tmp_path):
+    """SQLite by default. WEBDOC_TEST_PG=postgresql://user:pw@host:port runs
+    every test in a fresh database on that server (it needs pgvector), which
+    exercises the Postgres search paths."""
+    server = os.environ.get("WEBDOC_TEST_PG")
+    if not server:
+        yield f"sqlite:///{tmp_path}/t.db"
+        return
+    import psycopg
+    name = "wdtest_" + uuid.uuid4().hex[:12]
+    with psycopg.connect(server + "/postgres", autocommit=True) as c:
+        c.execute(f"CREATE DATABASE {name}")
+    yield f"{server}/{name}"
+    with psycopg.connect(server + "/postgres", autocommit=True) as c:
+        c.execute(f"DROP DATABASE {name} WITH (FORCE)")
+
+
+@pytest.fixture
+def settings(database_url):
+    return Settings(database_url=database_url, public_url="http://testserver",
                     oidc_issuer="https://auth.example/app/", oidc_client_id="wd",
                     oidc_client_secret="s", admin_group="webdoc-admins",
-                    max_document_bytes=20_000, dev_login=True)
+                    max_document_bytes=20_000, dev_login=True, embedder="hash",
+                    background_index=False)
 
 
 @pytest.fixture

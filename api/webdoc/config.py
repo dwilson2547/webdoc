@@ -21,6 +21,13 @@ class Settings:
     session_ttl_days: int = 30
     max_document_bytes: int = 1024 * 1024
     static_dir: str | None = None
+    embedder: str = "fastembed"
+    """fastembed (the local model, design §8), hash (a crude stand-in for tests
+    and quick dev runs), or off (keyword search only)."""
+    model_dir: str | None = None
+    background_index: bool = True
+    """Run the indexer thread (indexer.py). Tests switch it off and index on demand."""
+    """Where the embedding model is; the image ships it in /srv/models."""
     dev_login: bool = False
     """Local-only sign-in without authentik, for development and UI tests.
     Refused when public_url is https, so it can't be switched on in prod."""
@@ -51,5 +58,8 @@ class Settings:
             session_ttl_days=int(env.get("SESSION_TTL_DAYS") or cls.session_ttl_days),
             max_document_bytes=int(env.get("MAX_DOCUMENT_BYTES") or cls.max_document_bytes),
             static_dir=env.get("STATIC_DIR") or None,
+            embedder=(env.get("EMBEDDER") or cls.embedder).strip().lower(),
+            model_dir=env.get("MODEL_DIR") or None,
+            background_index=(env.get("BACKGROUND_INDEX") or "1") != "0",
             dev_login=(env.get("DEV_LOGIN") or "") == "1",
         )

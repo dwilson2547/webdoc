@@ -12,14 +12,60 @@ Accounts, sessions, tokens and OAuth tables are copied from nodewright.
 from __future__ import annotations
 
 import uuid
+from array import array
 from datetime import datetime, timezone
 
-from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text,
-                        UniqueConstraint)
+from sqlalchemy import (JSON, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, String,
+                        Text, UniqueConstraint)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import TypeDecorator, UserDefinedType
 
 Json = JSON().with_variant(JSONB(), "postgresql")
+EMBED_DIM = 384
+
+
+class PgVector(UserDefinedType):
+    """pgvector's `vector(n)`, for the Postgres side of Embedding."""
+    cache_ok = True
+
+    def __init__(self, dim: int = EMBED_DIM):
+        self.dim = dim
+
+    def get_col_spec(self, **_kw) -> str:
+        return f"vector({self.dim})"
+
+
+class Embedding(TypeDecorator):
+    """A list of floats: pgvector on Postgres (searched in SQL), float32
+    bytes elsewhere (SQLite dev mode compares in Python, design §8)."""
+    impl = LargeBinary
+    cache_ok = True
+
+    def __init__(self, dim: int = EMBED_DIM):
+        super().__init__()
+        self.dim = dim
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(PgVector(self.dim))
+        return dialect.type_descriptor(LargeBinary())
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return "[" + ",".join(f"{float(x):.7g}" for x in value) + "]"
+        return array("f", value).tobytes()
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if dialect.name == "postgresql":
+            return [float(x) for x in str(value).strip("[]").split(",")]
+        a = array("f")
+        a.frombytes(value)
+        return list(a)
 
 
 def utcnow() -> datetime:
@@ -271,9 +317,13 @@ class Document(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    indexed_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    """The revision the search chunks were built from; the indexer picks up
+    documents where it differs from `revision` (indexer.py)."""
 
     domain: Mapped[Domain] = relationship()
     project: Mapped[Project | None] = relationship()
+    author: Mapped[User | None] = relationship(foreign_keys=[created_by])
     tag_rows: Mapped[list["DocumentTag"]] = relationship(
         cascade="all, delete-orphan", passive_deletes=True, order_by="DocumentTag.tag")
 
@@ -338,6 +388,39 @@ class Event(Base):
     target_kind: Mapped[str] = mapped_column(String(20))
     target_id: Mapped[str] = mapped_column(String(32))
     summary: Mapped[str] = mapped_column(String(300), default="")
+
+
+class DocumentChunk(Base):
+    """One searchable piece of a document's current revision (design §8): a
+    section, or part of a long one. `content` is what is embedded and
+    full-text indexed: the title, the heading path, then the section text.
+    `domain_id` is copied from the document so search can filter without a join
+    to domains. Rebuilt by indexer.py whenever the document changes."""
+    __tablename__ = "document_chunks"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    domain_id: Mapped[str] = mapped_column(String(32), index=True)
+    ord: Mapped[int] = mapped_column(Integer)
+    heading: Mapped[str] = mapped_column(String(500), default="")
+    """Heading path joined with " > "; empty for text before the first heading."""
+    line: Mapped[int] = mapped_column(Integer, default=0)
+    """Line of the body where the chunk starts."""
+    content: Mapped[str] = mapped_column(Text)
+    hash: Mapped[str] = mapped_column(String(64))
+    model: Mapped[str] = mapped_column(String(100), default="")
+    embedding: Mapped[list | None] = mapped_column(Embedding(), nullable=True)
+
+
+class FeedCursor(Base):
+    """Where whats_new left off, per user and client (design §9.4)."""
+    __tablename__ = "feed_cursors"
+
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"),
+                                         primary_key=True)
+    client: Mapped[str] = mapped_column(String(100), primary_key=True)
+    seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class Template(Base):

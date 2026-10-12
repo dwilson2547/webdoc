@@ -28,11 +28,12 @@ oidc:
       hostnames:
         - auth.danwils.com
 
-# One replica: migrations run at startup.
+# One replica: migrations run at startup. The search embedding model runs
+# in-process (~245Mi resident with it loaded, measured in a local container).
 resources:
   requests:
     cpu: 50m
-    memory: 128Mi
+    memory: 320Mi
   limits:
     cpu: "1"
-    memory: 512Mi
+    memory: 768Mi
