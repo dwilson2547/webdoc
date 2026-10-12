@@ -338,3 +338,82 @@ class Event(Base):
     target_kind: Mapped[str] = mapped_column(String(20))
     target_id: Mapped[str] = mapped_column(String(32))
     summary: Mapped[str] = mapped_column(String(300), default="")
+
+
+class Template(Base):
+    """A document type (design §6): a markdown skeleton whose headings are the
+    sections (guidance for each in <!-- comments -->, "(optional)" after a
+    heading for a section that may be left out), the frontmatter fields it
+    requires, and default tags. Owned like domains (`owner_key`); `domain_id`
+    narrows it to one domain. Built-in types live in templates.py, not here."""
+    __tablename__ = "templates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    owner_key: Mapped[str] = mapped_column(String(48), index=True)
+    domain_id: Mapped[str | None] = mapped_column(
+        ForeignKey("domains.id", ondelete="CASCADE"), nullable=True, index=True)
+    type: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(Text, default="")
+    skeleton: Mapped[str] = mapped_column(Text, default="")
+    fields: Mapped[list] = mapped_column(Json, default=list)
+    """[{name, description, required}]"""
+    default_tags: Mapped[list] = mapped_column(Json, default=list)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TemplateRevision(Base):
+    """Every version of a template (design §9.2)."""
+    __tablename__ = "template_revisions"
+    __table_args__ = (UniqueConstraint("template_id", "version"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    template_id: Mapped[str] = mapped_column(
+        ForeignKey("templates.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(Text, default="")
+    skeleton: Mapped[str] = mapped_column(Text, default="")
+    fields: Mapped[list] = mapped_column(Json, default=list)
+    default_tags: Mapped[list] = mapped_column(Json, default=list)
+    actor_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class Proposal(Base):
+    """An agent's (or person's) request to change a taxonomy or a template
+    (design §5). Only a person approves, in the web UI; approving applies
+    `payload`. kind: domain.create | domain.update | template.create |
+    template.update. status: pending | approved | rejected | withdrawn."""
+    __tablename__ = "proposals"
+    __table_args__ = (Index("ix_proposals_owner_status", "owner_key", "status"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    kind: Mapped[str] = mapped_column(String(32))
+    owner_key: Mapped[str] = mapped_column(String(48))
+    """Whose taxonomy or templates it would change."""
+    domain_id: Mapped[str | None] = mapped_column(
+        ForeignKey("domains.id", ondelete="CASCADE"), nullable=True, index=True)
+    target_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """The template being changed, for template.update."""
+    payload: Mapped[dict] = mapped_column(Json, default=dict)
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    proposed_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    client: Mapped[str] = mapped_column(String(100), default="web")
+    decided_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    decision_note: Mapped[str] = mapped_column(Text, default="")
+    result_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """What approving created or changed (domain or template id)."""
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    proposer: Mapped[User | None] = relationship(foreign_keys=[proposed_by])
+    decider: Mapped[User | None] = relationship(foreign_keys=[decided_by])

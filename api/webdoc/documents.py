@@ -12,7 +12,7 @@ import difflib
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import access, sections, tags as tagmod
+from . import access, sections, tags as tagmod, templates
 from .activity import Actor, record
 from .models import Document, DocumentRevision, DocumentTag, Domain, Project, User, utcnow
 
@@ -65,28 +65,53 @@ def _snapshot(s: Session, doc: Document, actor: Actor, summary: str,
 
 def create(s: Session, actor: Actor, d: Domain, *, kind: str, title: str, body: str = "",
            tags: list[str] | None = None, project: Project | None = None,
+           spec: "templates.Spec | None" = None, fields: dict | None = None,
            max_bytes: int = DEFAULT_MAX_BYTES) -> Document:
+    """With `spec` (a document type), the body defaults to the type's starter
+    text, its default tags are added, and its required sections and fields must
+    be present (design §6)."""
     if kind not in KINDS:
         raise DocError(f"kind must be one of {', '.join(KINDS)}")
     if project is not None and project.domain_id != d.id:
         raise DocError("that project belongs to another domain")
+    clean = templates.clean_fields(spec, fields)
+    if spec is not None:
+        body = body if (body or "").strip() else templates.starter(spec.skeleton)
+        tags = list(dict.fromkeys(list(tags or []) + spec.default_tags))
+        gaps = templates.check(spec, body, clean)
+        if gaps["missing_sections"] or gaps["missing_fields"]:
+            raise DocError(_gap_text(spec, gaps))
     doc = Document(domain_id=d.id, project_id=project.id if project else None, kind=kind,
-                   title=_title(title), body=_check_size(body, max_bytes), fields={}, revision=1,
+                   title=_title(title), body=_check_size(body, max_bytes), fields=clean,
+                   template_type=spec.type if spec else None,
+                   template_version=spec.version if spec else None, revision=1,
                    created_by=actor.user.id)
     s.add(doc)
     s.flush()
     _set_tags(s, doc, tagmod.clean(tags))
     s.flush()
-    _snapshot(s, doc, actor, f"created {kind}")
-    record(s, actor, "document.create", "document", doc.id, f"created {kind} {doc.title}", d.id)
+    what = f"{spec.name} document" if spec else kind
+    _snapshot(s, doc, actor, f"created {what}")
+    record(s, actor, "document.create", "document", doc.id, f"created {what} {doc.title}", d.id)
     return doc
+
+
+def _gap_text(spec, gaps: dict) -> str:
+    parts = []
+    if gaps["missing_sections"]:
+        parts.append("missing sections: " + "; ".join(gaps["missing_sections"]))
+    if gaps["missing_fields"]:
+        parts.append("missing fields: " + ", ".join(gaps["missing_fields"]))
+    return (f"not a complete {spec.name} document ({'; '.join(parts)}). get_template shows the "
+            "sections and fields; leave the body empty to start from the template.")
 
 
 _UNSET = object()
 
 
 def write(s: Session, actor: Actor, doc: Document, *, title: str | None = None,
-          body: str | None = None, tags: list[str] | None = None, project=_UNSET,
+          body: str | None = None, tags: list[str] | None = None, fields: dict | None = None,
+          project=_UNSET,
           domain: Domain | None = None, base_revision: int | None = None,
           summary: str | None = None, source: str | None = None,
           restored_from: int | None = None, max_bytes: int = DEFAULT_MAX_BYTES) -> bool:
@@ -110,6 +135,14 @@ def write(s: Session, actor: Actor, doc: Document, *, title: str | None = None,
         if new != doc.tags:
             _set_tags(s, doc, new)
             changed.append("tags")
+    if fields is not None:
+        # Merge: a field set to "" or null is removed.
+        merged = {**(doc.fields or {}), **{k: v for k, v in fields.items()}}
+        new_fields = templates.clean_fields(None, {k: v for k, v in merged.items()
+                                                   if v not in (None, "")})
+        if new_fields != (doc.fields or {}):
+            doc.fields = new_fields
+            changed.append("fields")
     if domain is not None and domain.id != doc.domain_id:
         doc.domain_id = domain.id
         doc.domain = domain
@@ -196,9 +229,12 @@ def label(s: Session, actor: Actor, doc: Document, number: int, text: str | None
 
 def restore_version(s: Session, actor: Actor, doc: Document, number: int,
                     max_bytes: int = DEFAULT_MAX_BYTES) -> bool:
-    """Bring back an earlier revision's title, body and tags as a new revision."""
+    """Bring back an earlier revision's title, body, tags and fields as a new revision."""
     row = revision(s, doc, number)
+    old = dict(row.fields or {})
+    fields = {k: old.get(k) for k in set(old) | set(doc.fields or {})}
     return write(s, actor, doc, title=row.title, body=row.body, tags=list(row.tags or []),
+                 fields=fields,
                  summary=f"restored revision {number}", source="restore", restored_from=number,
                  max_bytes=max_bytes)
 
@@ -235,6 +271,7 @@ def out(doc: Document, *, body: bool = True, role: str | None = None) -> dict:
     o = {"id": doc.id, "kind": doc.kind, "title": doc.title, "domain_id": doc.domain_id,
          "domain": doc.domain.name, "project_id": doc.project_id,
          "project": doc.project.name if doc.project else None, "tags": doc.tags,
+         "type": doc.template_type, "fields": dict(doc.fields or {}),
          "revision": doc.revision, "created_at": doc.created_at.isoformat(),
          "updated_at": doc.updated_at.isoformat(),
          "deleted_at": doc.deleted_at.isoformat() if doc.deleted_at else None}

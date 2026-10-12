@@ -11,7 +11,9 @@ def test_no_tool_can_change_the_taxonomy(mcp):
     agent, _ = mcp
     names = {t["name"] for t in agent.rpc("tools/list").json()["result"]["tools"]}
     assert {"list_domains", "create_document", "edit_document", "diff_versions"} <= names
-    assert not [n for n in names if "domain" in n and n != "list_domains"]
+    domain_tools = {n for n in names if "domain" in n}
+    assert domain_tools == {"list_domains", "propose_domain", "propose_domain_change"}
+    assert not [n for n in names if "template" in n and not n.startswith(("list_", "get_", "propose_"))]
 
 
 def test_unknown_domain_is_refused_with_a_pointer_to_the_user(mcp):

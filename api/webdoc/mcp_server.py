@@ -21,7 +21,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import __version__, access, documents, domains, sections, styleguide, tags as tagmod, tokens
+from . import (__version__, access, documents, domains, proposals, sections, styleguide,
+               tags as tagmod, templates, tokens)
 from .activity import Actor
 from .config import Settings
 from .db import Database
@@ -33,7 +34,13 @@ the signed-in user who connected you, with their permissions.
 
 - Every document lives in exactly one domain. Domains are the user's closed taxonomy:
   call list_domains before writing, and only use domains it returns. You cannot create
-  or rename domains; if nothing fits, ask the user to add one in the web UI.
+  or rename domains. If nothing fits, propose_domain files a request the user approves
+  or rejects in the web UI (say so to the user); don't invent a domain or misfile instead.
+- Document types: when the user asks for a kind of document ("an architecture document",
+  "a decision record"), call get_template with that type for the domain, write each
+  section following its guidance, and pass type (and the required fields) to
+  create_document. list_templates shows the types a domain has. To add or change a type,
+  propose_template; only the user can approve it.
 - Projects (optional, inside a domain) and tags are open: create_project makes a project,
   and tags are free text. When you introduce a new tag, check the tag_hints in the reply:
   reuse an existing tag if one means the same thing.
@@ -107,7 +114,7 @@ def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
                 raise ToolError(f"{exc}. Read it again and retry, or use edit_document, which "
                                 "applies to the latest revision.") from None
             except (documents.DocError, domains.DomainError, sections.SectionError,
-                    tagmod.TagError) as exc:
+                    tagmod.TagError, templates.TemplateError, proposals.ProposalError) as exc:
                 raise ToolError(str(exc)) from None
 
     def url(doc_id: str) -> str:
@@ -215,6 +222,12 @@ def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
                 r = documents.revision(s, doc, revision)
                 o.update(title=r.title, body=r.body, tags=list(r.tags or []), revision=r.revision)
             o["outline"] = sections.outline(o["body"])
+            if doc.template_type:
+                try:
+                    spec = templates.resolve(s, doc.domain, doc.template_type)
+                    o["template_check"] = templates.check(spec, o["body"], o["fields"])
+                except templates.TemplateError:
+                    pass
             if heading_path:
                 o["section"] = sections.get(o["body"], heading_path)
                 del o["body"]
@@ -222,23 +235,32 @@ def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
         return run(ctx, go)
 
     def create(ctx: Context, kind: str, title: str, domain: str, body: str,
-               tags: list[str] | None, project: str | None) -> dict:
+               tags: list[str] | None, project: str | None, type_: str | None = None,
+               fields: dict | None = None) -> dict:
         def go(s, user, actor):
             d = find_domain(s, user, domain, access.WRITE)
             p = domains.find_project(s, d, project) if project else None
+            spec = templates.resolve(s, d, type_) if type_ else None
             hints = tag_hints(s, d, tags)
             doc = documents.create(s, actor, d, kind=kind, title=title, body=body, tags=tags,
-                                   project=p, max_bytes=limit)
+                                   project=p, spec=spec, fields=fields, max_bytes=limit)
             return {"id": doc.id, "url": url(doc.id), "revision": doc.revision, **hints}
         return run(ctx, go)
 
     @server.tool()
     def create_document(ctx: Context, title: Annotated[str, Field(min_length=1, max_length=300)],
                         domain: str, body: str = "", tags: list[str] | None = None,
-                        project: str | None = None) -> dict:
+                        project: str | None = None,
+                        type: Annotated[str | None, Field(description=(
+                            "A document type from list_templates, e.g. architecture. The body must "
+                            "then contain the type's required sections (leave it empty to start "
+                            "from the template's headings)."))] = None,
+                        fields: Annotated[dict[str, str] | None, Field(description=(
+                            "Values for the type's fields, e.g. {\"status\": \"draft\"}."))] = None
+                        ) -> dict:
         """Create a document: longer-lived, organised under markdown headings.
         domain is an id or slug from list_domains; project a project name in it."""
-        return create(ctx, "document", title, domain, body, tags, project)
+        return create(ctx, "document", title, domain, body, tags, project, type, fields)
 
     @server.tool()
     def create_note(ctx: Context, title: Annotated[str, Field(min_length=1, max_length=300)],
@@ -271,10 +293,13 @@ def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
 
     @server.tool()
     def update_document(ctx: Context, document_id: str, title: str | None = None,
-                        tags: list[str] | None = None, project: str | None = None,
+                        tags: list[str] | None = None,
+                        fields: Annotated[dict[str, str | None] | None, Field(description=(
+                            "Fields to set; merged with the current ones, null removes one."))] = None,
+                        project: str | None = None,
                         no_project: bool = False, domain: str | None = None,
                         body: str | None = None, base_revision: int | None = None) -> dict:
-        """Change a document's title, tags (replaces the list), project, or domain
+        """Change a document's title, tags (replaces the list), fields, project, or domain
         (moving needs edit rights on both). Replacing the whole body needs the
         base_revision you read, and fails if someone wrote since."""
         def go(s, user, actor):
@@ -289,6 +314,7 @@ def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
                 kw["project"] = domains.find_project(s, target or doc.domain, project)
             hints = tag_hints(s, target or doc.domain, tags)
             changed = documents.write(s, actor, doc, title=title, tags=tags, body=body,
+                                      fields=fields,
                                       domain=target, base_revision=base_revision,
                                       max_bytes=limit, **kw)
             return {"changed": changed, "revision": doc.revision, **hints}
@@ -350,6 +376,93 @@ def build(db: Database, settings: Settings) -> tuple[MCPServer, ASGIApp]:
             doc = access.document(s, user, document_id, access.WRITE)
             changed = documents.restore_version(s, actor, doc, revision, limit)
             return {"changed": changed, "revision": doc.revision}
+        return run(ctx, go)
+
+    # --- document types and proposals (design §5, §6) --------------------------
+
+    @server.tool()
+    def list_templates(ctx: Context, domain: str) -> dict:
+        """The document types usable in a domain (the domain's own, its owner's and
+        built-ins), with their sections and fields but not the full skeleton."""
+        def go(s, user, actor):
+            d = find_domain(s, user, domain)
+            return {"templates": [templates.out(x, with_skeleton=False)
+                                  for x in templates.available(s, d)]}
+        return run(ctx, go)
+
+    @server.tool()
+    def get_template(ctx: Context, type: str, domain: str) -> dict:
+        """One document type for a domain: its sections with the guidance for each
+        (write every required section, following the guidance), its fields, and
+        `starter`, the headings to begin from."""
+        def go(s, user, actor):
+            d = find_domain(s, user, domain)
+            return templates.out(templates.resolve(s, d, type))
+        return run(ctx, go)
+
+    @server.tool()
+    def propose_domain(ctx: Context, name: Annotated[str, Field(min_length=1, max_length=100)],
+                       description: str, rationale: str,
+                       scope: Literal["personal", "public"] = "personal",
+                       slug: str | None = None) -> dict:
+        """Ask the user to add a domain to their taxonomy (or an admin, for a public
+        one). Nothing changes until a person approves it in the web UI; tell the
+        user it is waiting. rationale: why no existing domain fits."""
+        def go(s, user, actor):
+            p = proposals.propose_domain(s, actor, scope=scope, name=name, description=description,
+                                         rationale=rationale, slug=slug)
+            return {"proposal_id": p.id, "status": p.status,
+                    "review_url": f"{settings.public_url}/proposals"}
+        return run(ctx, go)
+
+    @server.tool()
+    def propose_domain_change(ctx: Context, domain: str, rationale: str, name: str | None = None,
+                              slug: str | None = None, description: str | None = None) -> dict:
+        """Ask the domain's owner to rename it or change its slug or description."""
+        def go(s, user, actor):
+            d = find_domain(s, user, domain, access.WRITE)
+            p = proposals.propose_domain_change(s, actor, d, rationale=rationale, name=name,
+                                                slug=slug, description=description)
+            return {"proposal_id": p.id, "status": p.status,
+                    "review_url": f"{settings.public_url}/proposals"}
+        return run(ctx, go)
+
+    @server.tool()
+    def propose_template(ctx: Context, type: str,
+                         name: Annotated[str, Field(min_length=1, max_length=100)],
+                         skeleton: Annotated[str, Field(description=(
+                             "Markdown: one heading per section (## Section); put guidance for a "
+                             "section in an HTML comment under its heading; end a heading with "
+                             "\"(optional)\" if it may be left out."))],
+                         rationale: str, description: str | None = None,
+                         fields: Annotated[list[dict] | None, Field(description=(
+                             "[{name, description, required}] frontmatter fields the type needs. "
+                             "When changing an existing type, omit to keep its current fields."))
+                         ] = None,
+                         default_tags: list[str] | None = None,
+                         domain: Annotated[str | None, Field(description=(
+                             "Only for this domain; omit for all of the user's own domains."))
+                         ] = None) -> dict:
+        """Propose a new document type, or a change to an existing one of the same
+        type (give its full new skeleton; description, fields and default tags you
+        omit stay as they are). A person approves it in the web UI."""
+        def go(s, user, actor):
+            d = find_domain(s, user, domain, access.WRITE) if domain else None
+            p = proposals.propose_template(s, actor, d, type=type, name=name, skeleton=skeleton,
+                                           rationale=rationale, description=description,
+                                           fields=fields, default_tags=default_tags)
+            return {"proposal_id": p.id, "kind": p.kind, "status": p.status,
+                    "review_url": f"{settings.public_url}/proposals"}
+        return run(ctx, go)
+
+    @server.tool()
+    def list_proposals(ctx: Context,
+                       status: Literal["pending", "approved", "rejected", "withdrawn"] | None = None
+                       ) -> dict:
+        """Proposals made through your user's account, newest first, with the decision
+        and any note from whoever decided."""
+        def go(s, user, actor):
+            return {"proposals": [proposals.out(s, p) for p in proposals.mine(s, user, status)]}
         return run(ctx, go)
 
     host = settings.public_url.split("://", 1)[-1].split("/", 1)[0]

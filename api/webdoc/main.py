@@ -23,12 +23,12 @@ from sqlalchemy.orm import Session
 from starlette.routing import Route
 
 from . import (__version__, access, auth, documents, domains, export, mcp_server, oauth, oidc,
-               sections, styleguide, tags as tagmod, tokens)
+               proposals, sections, styleguide, tags as tagmod, templates, tokens)
 from .activity import Actor
 from .config import Settings
 from .db import Database
-from .models import (PLATFORM, AccessToken, Document, DocumentTag, DomainRevision, OAuthGrant,
-                     StyleGuide, User, utcnow)
+from .models import (PLATFORM, AccessToken, Document, DocumentTag, Domain, DomainRevision,
+                     OAuthGrant, StyleGuide, Template, TemplateRevision, User, utcnow)
 
 log = logging.getLogger("webdoc")
 
@@ -77,6 +77,8 @@ class DocumentIn(BaseModel):
     body: str = ""
     tags: list[str] = []
     project_id: str | None = Field(default=None, max_length=32)
+    type: str | None = Field(default=None, max_length=64)
+    fields: dict[str, str] = {}
 
 
 class DocumentPut(BaseModel):
@@ -86,8 +88,33 @@ class DocumentPut(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
     body: str | None = None
     tags: list[str] | None = None
+    fields: dict[str, str | None] | None = None
     project_id: str | None = Field(default=None, max_length=32)
     domain_id: str | None = Field(default=None, max_length=32)
+
+
+class TemplateIn(BaseModel):
+    scope: str = Field(default="personal", pattern="^(personal|public)$")
+    domain_id: str | None = Field(default=None, max_length=32)
+    type: str = Field(min_length=1, max_length=64)
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(default="", max_length=2000)
+    skeleton: str = Field(max_length=templates.MAX_SKELETON)
+    fields: list[dict] = []
+    default_tags: list[str] = []
+
+
+class TemplatePatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    description: str | None = Field(default=None, max_length=2000)
+    skeleton: str | None = Field(default=None, max_length=templates.MAX_SKELETON)
+    fields: list[dict] | None = None
+    default_tags: list[str] | None = None
+
+
+class DecisionIn(BaseModel):
+    note: str = Field(default="", max_length=2000)
+    edits: dict | None = None
 
 
 class LabelIn(BaseModel):
@@ -158,7 +185,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         except documents.Conflict as exc:
             raise HTTPException(409, {"message": str(exc), "current": exc.current}) from None
         except (documents.DocError, domains.DomainError, sections.SectionError,
-                tagmod.TagError) as exc:
+                tagmod.TagError, templates.TemplateError, proposals.ProposalError) as exc:
             raise HTTPException(422, str(exc)) from None
 
     # --- meta and auth ------------------------------------------------------
@@ -375,8 +402,10 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                         s: Session = Depends(session)):
         d = guard(access.domain, s, user, body.domain_id, access.WRITE)
         p = guard(access.project, s, user, body.project_id) if body.project_id else None
+        spec = guard(templates.resolve, s, d, body.type) if body.type else None
         doc = guard(documents.create, s, actor_for(user), d, kind=body.kind, title=body.title,
-                    body=body.body, tags=body.tags, project=p, max_bytes=limit)
+                    body=body.body, tags=body.tags, project=p, spec=spec, fields=body.fields,
+                    max_bytes=limit)
         return documents.out(doc, role=access.role_on(s, user, d))
 
     def doc_full(s: Session, doc: Document, user: User | None) -> dict:
@@ -385,6 +414,13 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         o["can_delete"] = access.DELETE in access.ROLES.get(role or "", ())
         o["can_purge"] = access.PURGE in access.ROLES.get(role or "", ())
         o["domain_scope"] = doc.domain.scope
+        if doc.template_type:
+            try:
+                spec = templates.resolve(s, doc.domain, doc.template_type)
+                o["template"] = {**templates.out(spec, with_skeleton=False),
+                                 "check": templates.check(spec, doc.body, doc.fields or {})}
+            except templates.TemplateError:
+                o["template"] = None
         return o
 
     @app.get("/api/documents/{doc_id}")
@@ -404,7 +440,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
             kw["project"] = (guard(access.project, s, user, body.project_id)
                              if body.project_id else None)
         guard(documents.write, s, actor_for(user), doc, title=body.title, body=body.body,
-              tags=body.tags, domain=target, base_revision=body.base_revision, max_bytes=limit,
+              tags=body.tags, fields=body.fields, domain=target, base_revision=body.base_revision, max_bytes=limit,
               **kw)
         return doc_full(s, doc, user)
 
@@ -481,6 +517,97 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                          .where(Document.domain_id.in_(ids), Document.deleted_at.is_(None))
                          .group_by(DocumentTag.tag).order_by(func.count().desc(), DocumentTag.tag))
         return {"tags": [{"tag": t, "count": n} for t, n in rows]}
+
+    # --- templates (design §6) -----------------------------------------------
+
+    @app.get("/api/domains/{domain_id}/templates")
+    def domain_templates(domain_id: str, user: User | None = Depends(maybe_user),
+                         s: Session = Depends(session)):
+        """Types usable in a domain, resolved (domain, owner, built-in)."""
+        d = guard(access.domain, s, user, domain_id)
+        return {"templates": [templates.out(x) for x in templates.available(s, d)]}
+
+    @app.get("/api/templates")
+    def list_templates(user: User = Depends(user_dep), s: Session = Depends(session)):
+        """Templates this user can change, plus the built-ins."""
+        return {"templates": [templates.stored_out(s, t) for t in templates.managed(s, user)],
+                "builtin": [templates.out(x) for x in templates.BUILTINS.values()]}
+
+    def template_for(s: Session, user: User, tid: str) -> Template:
+        t = s.get(Template, tid)
+        d = s.get(Domain, t.domain_id) if t and t.domain_id else None
+        if t is None or not templates.can_manage(s, user, t.owner_key, d):
+            raise HTTPException(404, "template not found")
+        return t
+
+    @app.post("/api/templates", status_code=201)
+    def create_template(body: TemplateIn, user: User = Depends(user_dep),
+                        s: Session = Depends(session)):
+        owner = PLATFORM if body.scope == "public" else domains.personal_key(user)
+        d = None
+        if body.domain_id:
+            d = guard(access.domain, s, user, body.domain_id)
+            owner = d.owner_key
+        if not templates.can_manage(s, user, owner, d):
+            raise HTTPException(403, "you can't manage templates there")
+        t = guard(templates.create, s, actor_for(user), owner, d, type=body.type, name=body.name,
+                  description=body.description, skeleton=body.skeleton, fields=body.fields,
+                  default_tags=body.default_tags)
+        return templates.stored_out(s, t)
+
+    @app.patch("/api/templates/{tid}")
+    def patch_template(tid: str, body: TemplatePatch, user: User = Depends(user_dep),
+                       s: Session = Depends(session)):
+        t = template_for(s, user, tid)
+        guard(templates.update, s, actor_for(user), t, name=body.name, description=body.description,
+              skeleton=body.skeleton, fields=body.fields, default_tags=body.default_tags)
+        return templates.stored_out(s, t)
+
+    @app.delete("/api/templates/{tid}", status_code=204)
+    def delete_template(tid: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+        templates.delete(s, actor_for(user), template_for(s, user, tid))
+        return Response(status_code=204)
+
+    @app.get("/api/templates/{tid}/revisions")
+    def template_history(tid: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+        t = template_for(s, user, tid)
+        rows = s.scalars(select(TemplateRevision).where(TemplateRevision.template_id == t.id)
+                         .order_by(TemplateRevision.version.desc()))
+        names = {u.id: u.username for u in s.scalars(select(User))}
+        return {"revisions": [{"version": r.version, "name": r.name, "skeleton": r.skeleton,
+                               "fields": r.fields, "by": names.get(r.actor_id),
+                               "created_at": r.created_at.isoformat()} for r in rows]}
+
+    # --- proposals (design §5) -----------------------------------------------
+
+    @app.get("/api/proposals")
+    def list_proposals(user: User = Depends(user_dep), s: Session = Depends(session)):
+        return {"to_decide": [proposals.out(s, p, user) for p in proposals.to_decide(s, user)],
+                "mine": [proposals.out(s, p, user) for p in proposals.mine(s, user)]}
+
+    @app.get("/api/proposals/count")
+    def count_proposals(user: User = Depends(user_dep), s: Session = Depends(session)):
+        return {"pending": len(proposals.to_decide(s, user))}
+
+    @app.post("/api/proposals/{pid}/approve")
+    def approve_proposal(pid: str, body: DecisionIn, user: User = Depends(user_dep),
+                         s: Session = Depends(session)):
+        p = guard(proposals.get, s, user, pid)
+        guard(proposals.approve, s, actor_for(user), p, body.edits)
+        return proposals.out(s, p, user)
+
+    @app.post("/api/proposals/{pid}/reject")
+    def reject_proposal(pid: str, body: DecisionIn, user: User = Depends(user_dep),
+                        s: Session = Depends(session)):
+        p = guard(proposals.get, s, user, pid)
+        guard(proposals.reject, s, actor_for(user), p, body.note)
+        return proposals.out(s, p, user)
+
+    @app.post("/api/proposals/{pid}/withdraw")
+    def withdraw_proposal(pid: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+        p = guard(proposals.get, s, user, pid)
+        guard(proposals.withdraw, s, actor_for(user), p)
+        return proposals.out(s, p, user)
 
     # --- agents: tokens, connected apps, writing guide (cookie session only) --
 
