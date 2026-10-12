@@ -59,20 +59,27 @@ Chunk   heading-scoped text + embedding + tsvector, for search
 
 ## 4. Roles and permissions 📐
 
-Everyone signs in through the cluster's authentik, outside contributors included. Four roles:
+Everyone who writes signs in through the cluster's authentik, outside contributors included;
+signed-out visitors can read public domains (below). Four roles:
 
 | Role | Scope | Can |
 |---|---|---|
 | **admin** | platform | Everything: create/edit public domains and their templates, grant any role, moderate anything, approve proposals for public domains. |
-| **moderator** | one org | Admin *within that org*: manage org members and their roles, org domains and templates, approve org proposals, hide/lock/merge org content. |
+| **moderator** | one org, or one public domain | Admin *within that scope*. Org: manage org members and their roles, org domains and templates, approve org proposals, hide/lock/merge org content. Public domain: grant editor on it, manage its templates, hide/lock/merge its content (creating or deleting public domains stays admin-only). |
 | **editor** | org, or a shared domain | Create and edit documents and notes; create projects and tags. |
 | **reader** | org, or a shared domain | Read and search only. |
 
 - **Personal domains**: the owning user has full control over them and may share a domain with other
   users as reader or editor.
-- **Public domains**: every signed-in user is a reader and may *contribute* — publish their own
-  contributions, reply, confirm. Contributing is not editing: changing someone else's contribution
-  needs editor on that domain (granted by an admin). Public domains are moderated by admins.
+- **Public domains**: anyone, signed in or not, can browse, read and search them in the web UI.
+  Every signed-in user may also *contribute* — publish their own contributions, reply, confirm.
+  Contributing is not editing: changing someone else's contribution needs editor on that domain
+  (granted by an admin or that domain's moderator). Admins moderate all public domains and may
+  appoint moderators for individual ones.
+- **Signed-out visitors** get the public home section, public documents and public-only search
+  (`search` and `find`), rate-limited per IP since each semantic query costs a CPU embedding. They
+  cannot contribute, reply, confirm, or see activity beyond public documents. The MCP server always
+  requires sign-in.
 - **Agents** act as the user who connected them, with that user's role and never more. The domain
   rule in §5 binds agents of admins and moderators too: they can propose, not approve.
 - One role per user per scope; the effective permission on a document is the strongest grant that
@@ -232,8 +239,6 @@ can be extracted later once both copies have settled):
 
 ## 15. Open questions
 
-- Anonymous (signed-out) reading of public domains, or sign-in required for everything?
-- Should public domains be able to have their own moderators, or are admins enough?
 - Should a public contribution keep a link back to a private source document, visible only to the
   author?
 - Does an org domain inherit templates from the org, or only from itself?
