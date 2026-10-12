@@ -511,8 +511,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         pass type (get_template shows its sections) and its fields."""
         def go(s, user, actor):
             d = find_domain(s, user, domain)
-            if not contributions.can_contribute(user, d):
-                raise ToolError(f"{d.name} doesn't take contributions")
+            contributions.check_draft(d, user, type)
             if not checked_duplicates:
                 emb = indexer.semantic if indexer is not None else None
                 dups = contributions.possible_duplicates(s, emb, d, title, body)

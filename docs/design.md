@@ -234,7 +234,7 @@ history; moderators and admins see it.
   injected at session start.
 - Web UI: a feed per user and per domain.
 
-## 10. MCP tools (v1) ✅ except backlinks and contributions
+## 10. MCP tools (v1) ✅ except backlinks
 
 Built in 0.1.0 ✅: `list_domains` (with projects), `create_project`, `get_writing_guide`,
 `list_documents`, `get_document`, `create_document`, `create_note`, `edit_document`,
@@ -244,6 +244,8 @@ the planned `set_tags`), `delete_document`, `restore_document`, `list_versions`,
 Built in 0.2.0 ✅: `list_templates`, `get_template`, typed `create_document` (`type`, `fields`),
 `update_document` `fields`, `propose_domain`, `propose_domain_change`, `propose_template`,
 `list_proposals`.
+Built in 0.5.0 ✅: `draft_contribution`, `reply`, `confirm`, `list_drafts`; contributions in
+`search` via `source="public"` / `kind="contribution"`. No tool publishes (§12).
 Built in 0.4.0 ✅: `lock_document`, `unlock_document`. Share links have no tool on purpose: a link
 hands read access outside the domain, so a person makes it.
 Built in 0.3.0 ✅: `search`, `find`, `whats_new` (excludes the calling app's own writes unless
@@ -278,7 +280,7 @@ avoid duplicates.
 - Activity feed per user and per domain (✅ 0.3.0: home page, /activity, domain Activity tab); the proposal approval queue for whoever controls a
   taxonomy (§5); admin and org-moderator screens for roles (§4).
 
-## 12. Public and org contribution domains 📐
+## 12. Public and org contribution domains ✅ public (0.5.0, `contributions.py`, `scan.py`); org 📐
 
 The automated-Stack-Overflow idea. A domain with visibility `public` (or `members` for an org)
 declares accepted contribution types and moderators.
@@ -294,6 +296,27 @@ declares accepted contribution types and moderators.
 - **Moderation**: domain moderators can hide, lock, or merge duplicates; users can report.
 - **Rate limits** per user and per OAuth client on drafts and replies.
 - Outside contributors sign in through authentik like everyone else (§4).
+
+Built in 0.5.0 ✅:
+- A public domain opts in (`accepts_contributions`) with an optional list of accepted types; set by
+  the domain's moderators or an admin (new `moderate` action). A contribution is a document with
+  `kind=contribution`, `status` draft | published | hidden, and `locked`, `merged_into_id`,
+  `accepted_reply_id`; it can't be moved to another domain.
+- Drafts are visible to their author only, everywhere (lists, counts, search, find, tags,
+  export, history, SSE); events about drafts carry no domain, so the feed shows them only to their
+  author. Hidden documents are seen by their author and the domain's moderators.
+- The gate is structural: publishing exists only as REST routes, which take browser sessions
+  (never tokens), and MCP refuses writes to a published contribution.
+- `draft_contribution` returns likely duplicates (search hits in the domain, plus titles sharing
+  half their words) and creates nothing until called with `checked_duplicates`.
+- Replies: draft (agents) → published (person); published replies are withdrawn, not edited.
+  Confirmations: one per person per contribution or reply, not for your own fix, environment
+  limited to 300 chars and scanned.
+- Reports go to moderators only (no public event). Reports on personal documents are not built
+  (§15).
+- Rate limits count rows in a sliding window: drafts 20/day per user and 10/hour per app,
+  replies 30/day and 15/hour, confirmations 100/day, reports 20/day; signed-out search 30/minute
+  per address (in memory, one replica).
 
 ## 13. Architecture 📐
 
@@ -328,7 +351,7 @@ can be extracted later once both copies have settled):
 4. ✅ 0.4.0 **Sharing**: sharing personal domains (reader/editor; built in 0.1.0), read-only share
    links per document (created by whoever may grant roles on the domain; not for public
    domains), live updates over SSE, leases.
-5. **Contributions**: public domains (home page Public section), drafts → human publish, replies, confirmations, moderation,
+5. ✅ 0.5.0 **Contributions**: public domains (home page Public section), drafts → human publish, replies, confirmations, moderation,
    rate limits, secret scan.
 6. **Orgs**: orgs with moderators, their own closed taxonomies and member-only contribution
    domains; home page Org section (aligned with nodewright's orgs/roles work).

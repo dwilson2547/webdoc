@@ -69,10 +69,10 @@ function Decide({ p, onDone }: { p: Proposal; onDone: () => void }) {
   );
 }
 
-export function Proposals({ onCount }: { onCount: (n: number) => void }) {
+export function Proposals({ onCount }: { onCount: () => void }) {
   const [data, setData] = useState<{ to_decide: Proposal[]; mine: Proposal[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const load = () => api.proposals().then((r) => { setData(r); onCount(r.to_decide.length); }, (e) => setError(errText(e)));
+  const load = () => api.proposals().then((r) => { setData(r); onCount(); }, (e) => setError(errText(e)));
   useEffect(() => { void load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
   if (error) return <div className="page"><p className="error">{error}</p></div>;
   if (!data) return <div className="page"><p className="muted">Loading…</p></div>;

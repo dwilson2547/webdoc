@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, errText, type DomainDetail, type DomainRevision, type Grant, type Me, type Role } from "./api";
+import { api, errText, type DomainDetail, type DomainRevision, type Grant, type Me, type Role, type TemplateSpec } from "./api";
 import { navigate } from "./router";
 import { ROLE_TEXT, Modal } from "./util";
 
@@ -99,6 +99,42 @@ function People({ d, me }: { d: DomainDetail; me: Me }) {
   );
 }
 
+function Contributions({ d, onChanged }: { d: DomainDetail; onChanged: () => void }) {
+  const [accepts, setAccepts] = useState(d.accepts_contributions);
+  const [types, setTypes] = useState<string[]>(d.contribution_types);
+  const [all, setAll] = useState<TemplateSpec[]>([]);
+  const [msg, setMsg] = useState<string | null>(null);
+  useEffect(() => { api.domainTemplates(d.id).then(setAll, () => setAll([])); }, [d.id]);
+  const toggle = (t: string) => setTypes((ts) => (ts.includes(t) ? ts.filter((x) => x !== t) : [...ts, t]));
+  const save = async () => {
+    try {
+      await api.contributionSettings(d.id, accepts, types);
+      setMsg("Saved.");
+      onChanged();
+    } catch (e) {
+      setMsg(errText(e));
+    }
+  };
+  return (
+    <form className="stack" onSubmit={(e) => { e.preventDefault(); void save(); }}>
+      <p className="muted">
+        Open to contributions, anyone signed in can post here, like a Q&amp;A site. Posts start as drafts their
+        author publishes after review (agents can only draft), pass a secret scan, and you moderate them.
+      </p>
+      <label className="check"><input type="checkbox" checked={accepts} onChange={(e) => setAccepts(e.target.checked)} />Accept contributions</label>
+      <div>
+        <div className="muted">Accepted types (none ticked: any, including untyped)</div>
+        {all.map((t) => (
+          <label key={t.type} className="check"><input type="checkbox" checked={types.includes(t.type)} onChange={() => toggle(t.type)} />
+            {t.name} <span className="muted">({t.type})</span></label>
+        ))}
+      </div>
+      {msg && <p className="muted">{msg}</p>}
+      <div className="row"><button type="submit" className="primary">Save</button></div>
+    </form>
+  );
+}
+
 function DomainHistory({ d }: { d: DomainDetail }) {
   const [rows, setRows] = useState<DomainRevision[] | null>(null);
   useEffect(() => { api.domainHistory(d.id).then(setRows, () => setRows([])); }, [d.id]);
@@ -118,16 +154,19 @@ export function DomainSettings({ domain, me, onClose, onChanged }: {
   domain: DomainDetail; me: Me; onClose: () => void; onChanged: () => void;
 }) {
   const manage = domain.can.includes("manage");
-  const [tab, setTab] = useState<"general" | "people" | "history">(manage ? "general" : "people");
+  const moderate = domain.scope === "public" && domain.can.includes("moderate");
+  const [tab, setTab] = useState<"general" | "people" | "contributions" | "history">(manage ? "general" : "people");
   return (
     <Modal title={`${domain.name} settings`} onClose={onClose}>
       <div className="tabs">
         {manage && <button className={tab === "general" ? "on" : ""} onClick={() => setTab("general")}>General</button>}
         <button className={tab === "people" ? "on" : ""} onClick={() => setTab("people")}>People</button>
+        {moderate && <button className={tab === "contributions" ? "on" : ""} onClick={() => setTab("contributions")}>Contributions</button>}
         {manage && <button className={tab === "history" ? "on" : ""} onClick={() => setTab("history")}>History</button>}
       </div>
       {tab === "general" && <General d={domain} onChanged={onChanged} />}
       {tab === "people" && <People d={domain} me={me} />}
+      {tab === "contributions" && <Contributions d={domain} onChanged={onChanged} />}
       {tab === "history" && <DomainHistory d={domain} />}
     </Modal>
   );

@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0 — 2026-10-12
+
+Phase 5 (design §14): public contribution domains.
+
+- Moderators open a public domain to contributions and choose the accepted document types.
+  Any signed-in user can then contribute.
+- Human gate: every contribution and every agent-written reply starts as a draft only its author
+  sees (and the activity feed shows only to them). A person publishes it from the web UI; no
+  MCP tool publishes, and agents can't edit a published contribution. A Drafts page (with a count
+  in the header) lists what's waiting.
+- Secret scan on publishing, posting a reply and editing a published contribution: keys, tokens,
+  passwords and private keys block; private IPs, internal host names, home paths and email
+  addresses need "publish anyway". Confirmation notes must be free of both.
+- Replies (another fix, didn't work, comment), published replies withdrawn rather than edited;
+  "this worked for me" confirmations with an optional environment, on the contribution or a reply;
+  the author marks the reply that resolved it.
+- Moderation: hide (with a reason the author sees), lock, mark as a duplicate of another post
+  (drops out of search); reports from any signed-in user to a Moderation page for the domain's
+  moderators and admins.
+- Rate limits on drafts, replies, confirmations and reports per user and per app, and on
+  signed-out search per address.
+- MCP: draft_contribution (checks for duplicates first and creates nothing if it finds some),
+  reply, confirm, list_drafts; get_document includes the thread.
+
+### Fixed
+- The markdown editor no longer throws when it is replaced right after it appears (picking a
+  type as the page loads).
+
 ## 0.4.0 — 2026-10-12
 
 Phase 4 (design §14): leases, live updates, share links. (Sharing personal domains with

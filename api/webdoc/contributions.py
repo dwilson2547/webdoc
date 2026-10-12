@@ -85,27 +85,53 @@ def can_contribute(user: User | None, d: Domain) -> bool:
 
 # --- drafting and publishing ----------------------------------------------------
 
+TITLE_OVERLAP = 0.5
+
+
 def possible_duplicates(s: Session, emb, d: Domain, title: str, body: str,
                         exclude: str | None = None, limit: int = 5) -> list[dict]:
-    """Published contributions in this domain that look like the same thing."""
+    """Published contributions in this domain that look like the same thing:
+    search hits, plus titles sharing most of their words with this one (which
+    catches posts the indexer hasn't reached yet)."""
     from . import search
     q = f"{title}\n{(body or '')[:500]}"
     res = search.search(s, None, emb, q, search.Filters(domain_ids=[d.id], kind="contribution"),
                         limit=limit + 1)
-    return [{"id": r["id"], "title": r["title"], "heading": r["heading"], "snippet": r["snippet"],
-             "matched": r["matched"]} for r in res["results"] if r["id"] != exclude][:limit]
+    out = [{"id": r["id"], "title": r["title"], "heading": r["heading"], "snippet": r["snippet"],
+            "matched": r["matched"]} for r in res["results"] if r["id"] != exclude]
+    words = set(search._terms(title))
+    if words:
+        seen = {o["id"] for o in out}
+        recent = s.scalars(select(Document).where(
+            Document.domain_id == d.id, Document.kind == "contribution",
+            Document.status == "published", Document.deleted_at.is_(None),
+            Document.merged_into_id.is_(None)).order_by(Document.published_at.desc()).limit(500))
+        for doc in recent:
+            other = set(search._terms(doc.title))
+            if doc.id in seen or doc.id == exclude or not other:
+                continue
+            if len(words & other) / min(len(words), len(other)) >= TITLE_OVERLAP:
+                out.append({"id": doc.id, "title": doc.title, "heading": "", "snippet": "",
+                            "matched": ["title words"]})
+    return out[:limit]
 
 
-def draft(s: Session, actor: Actor, d: Domain, *, title: str, body: str = "",
-          type: str | None = None, fields: dict | None = None, tags: list[str] | None = None,
-          max_bytes: int = documents.DEFAULT_MAX_BYTES) -> Document:
-    if not can_contribute(actor.user, d):
+def check_draft(d: Domain, user: User, type: str | None) -> str | None:
+    """Whether this user may draft here with this type; returns the type."""
+    if not can_contribute(user, d):
         raise ContribError(f"{d.name} doesn't take contributions")
     type = (type or "").strip().lower() or None
     if d.contribution_types and type not in d.contribution_types:
         raise ContribError(f"{d.name} takes contributions of type "
                            + " or ".join(d.contribution_types)
                            + "; get_template shows the sections")
+    return type
+
+
+def draft(s: Session, actor: Actor, d: Domain, *, title: str, body: str = "",
+          type: str | None = None, fields: dict | None = None, tags: list[str] | None = None,
+          max_bytes: int = documents.DEFAULT_MAX_BYTES) -> Document:
+    type = check_draft(d, actor.user, type)
     mine = (select(func.count()).select_from(Document)
             .where(Document.created_by == actor.user.id, Document.kind == "contribution",
                    Document.created_at > _since("draft_user")))

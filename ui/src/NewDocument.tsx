@@ -8,35 +8,44 @@ import { parseTags } from "./util";
 export function NewDocument({ search }: { search: string }) {
   const params = new URLSearchParams(search);
   const domainId = params.get("domain") || "";
-  const [kind, setKind] = useState<Kind>(params.get("kind") === "note" ? "note" : "document");
+  const initialKind = params.get("kind");
+  const [kind, setKind] = useState<Kind>(initialKind === "note" || initialKind === "contribution" ? initialKind : "document");
   const [domain, setDomain] = useState<DomainDetail | null>(null);
-  const [types, setTypes] = useState<TemplateSpec[]>([]);
+  const [types, setTypes] = useState<TemplateSpec[] | null>(null);
   const [type, setType] = useState(params.get("type") || "");
   const [title, setTitle] = useState("");
   const [tags, setTags] = useState("");
   const [fields, setFields] = useState<Record<string, string>>({});
   const [project, setProject] = useState(params.get("project") || "");
   const [error, setError] = useState<string | null>(null);
-  const [editorKey, setEditorKey] = useState(0);
   const editor = useRef<EditorHandle>(null);
   useEffect(() => {
     api.domain(domainId).then(setDomain, (e) => setError(errText(e)));
     api.domainTemplates(domainId).then(setTypes, () => setTypes([]));
   }, [domainId]);
+  // A contribution domain may only take certain types; pick the only one.
+  const allowed = kind === "contribution" && domain?.contribution_types.length
+    ? (types ?? []).filter((t) => domain.contribution_types.includes(t.type)) : types ?? [];
+  useEffect(() => {
+    if (kind === "contribution" && domain?.contribution_types.length === 1) setType(domain.contribution_types[0]);
+  }, [kind, domain?.contribution_types]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const spec = types.find((t) => t.type === type) ?? null;
+  const spec = types?.find((t) => t.type === type) ?? null;
+  // Mount the editor once the domain, its types and any automatic type
+  // choice have settled: Toast UI throws if destroyed right after creation.
+  const only = kind === "contribution" && domain?.contribution_types.length === 1 ? domain.contribution_types[0] : null;
+  const ready = !!domain && types !== null && (!only || type === only);
   // Picking a type starts the body from its headings (the editor remounts with them).
   useEffect(() => {
     if (!spec) return;
     setTags((t) => t || spec.default_tags.join(", "));
-    setEditorKey((k) => k + 1);
   }, [spec?.type]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const create = async () => {
     try {
       const d = await api.createDocument({
         domain_id: domainId, kind, title: title.trim(), body: editor.current!.getMarkdown(),
-        tags: parseTags(tags), project_id: project || null, type: spec ? spec.type : null, fields,
+        tags: parseTags(tags), project_id: kind === "contribution" ? null : project || null, type: spec ? spec.type : null, fields,
       });
       navigate(`/d/${d.id}`);
     } catch (e) {
@@ -52,33 +61,37 @@ export function NewDocument({ search }: { search: string }) {
         <div className="editing">
           <input className="title-input" autoFocus placeholder="Title" value={title} maxLength={300} onChange={(e) => setTitle(e.target.value)} />
           <div className="row meta-edit">
-            <label>Kind
+            {kind !== "contribution" && <label>Kind
               <select value={kind} onChange={(e) => { setKind(e.target.value as Kind); if (e.target.value === "note") setType(""); }}>
                 <option value="document">Document</option>
                 <option value="note">Note</option>
               </select>
-            </label>
-            {kind === "document" && (
+            </label>}
+            {kind !== "note" && (
               <label>Type
                 <select value={type} onChange={(e) => setType(e.target.value)}>
-                  <option value="">None</option>
-                  {types.map((t) => <option key={t.type} value={t.type}>{t.name}{t.source !== "built-in" ? "" : " (built-in)"}</option>)}
+                  {!(kind === "contribution" && domain.contribution_types.length) && <option value="">None</option>}
+                  {allowed.map((t) => <option key={t.type} value={t.type}>{t.name}{t.source !== "built-in" ? "" : " (built-in)"}</option>)}
                 </select>
               </label>
             )}
-            <label>Project
+            {kind !== "contribution" && <label>Project
               <select value={project} onChange={(e) => setProject(e.target.value)}>
                 <option value="">None</option>
                 {domain.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
-            </label>
+            </label>}
             <label className="grow">Tags <input value={tags} placeholder="comma, separated" onChange={(e) => setTags(e.target.value)} /></label>
           </div>
+          {kind === "contribution" && (
+            <p className="banner draft">This starts as a draft only you can see. You publish it after reading it through;
+              it's then public to everyone, so leave out hostnames, addresses, internal paths, project names and secrets.</p>
+          )}
           {spec && <FieldsEditor defs={spec.fields} values={fields} onChange={setFields} />}
-          <MarkdownEditor key={editorKey} ref={editor} initial={spec?.starter ?? ""} />
+          {ready ? <MarkdownEditor key={spec?.type ?? ""} ref={editor} initial={spec?.starter ?? ""} /> : <p className="muted">Loading…</p>}
           {error && <p className="error">{error}</p>}
           <div className="row">
-            <button className="primary" disabled={!title.trim()} onClick={() => void create()}>Create</button>
+            <button className="primary" disabled={!title.trim()} onClick={() => void create()}>{kind === "contribution" ? "Save draft" : "Create"}</button>
             <button onClick={() => history.back()}>Cancel</button>
           </div>
         </div>

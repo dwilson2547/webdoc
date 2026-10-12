@@ -173,6 +173,11 @@ def test_agents_draft_with_a_duplicate_check_and_never_publish(forum):
         r = agent.call("draft_contribution", domain="fixes", title="Traefik gives 404 after renewal",
                        body="routes 404 after cert-manager renewed the certificate")
         assert r["created"] is False and r["possible_duplicates"][0]["id"] == first["id"]
+        # Found by title words too, before the indexer has seen a new post.
+        fresh = draft(alice, d, title="Longhorn volume stuck attaching")
+        publish(alice, fresh)
+        r = agent.call("draft_contribution", domain="fixes", title="Volume stuck attaching in Longhorn")
+        assert [x["id"] for x in r["possible_duplicates"]] == [fresh["id"]]
         r = agent.call("draft_contribution", domain="fixes", title="Traefik gives 404 after renewal",
                        body="different cause", checked_duplicates=True)
         assert r["created"] and r["status"] == "draft"

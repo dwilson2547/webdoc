@@ -66,6 +66,7 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
         <span className="grow" />
         {canWrite && <button className="primary" onClick={() => newDoc("document")}>New document</button>}
         {canWrite && <button onClick={() => newDoc("note")}>New note</button>}
+        {d.can_contribute && <button className={canWrite ? "" : "primary"} onClick={() => newDoc("contribution")}>New contribution</button>}
         <a className="button" href={`/api/domains/${d.id}/export`} title="Download as markdown files">Export</a>
         {me && (d.can.includes("manage") || d.can.includes("grants")) &&
           <button onClick={() => setSettings(true)}>Settings</button>}
@@ -85,7 +86,7 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
                   onChange={(e) => setNewProject(e.target.value)} onBlur={() => void addProject()} />
               </form>)}
           <h4>Kind</h4>
-          {([undefined, "document", "note"] as const).map((k) => (
+          {([undefined, "document", "note", ...(d.accepts_contributions ? ["contribution" as const] : [])] as const).map((k) => (
             <button key={k || "all"} className={"flat" + (f.kind === k ? " on" : "")} onClick={() => set({ kind: k })}>
               {k ? k[0].toUpperCase() + k.slice(1) + "s" : "All"}
             </button>
@@ -119,6 +120,7 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
               <li key={doc.id}>
                 <div className="row">
                   <span className={"kind k-" + doc.kind}>{doc.kind}</span>
+                  {doc.status !== "published" && <span className={"badge st-" + doc.status}>{doc.status}</span>}
                   {f.trashed ? <span className="doc-title">{doc.title}</span>
                     : <Link to={`/d/${doc.id}`} className="doc-title">{doc.title}</Link>}
                   <span className="grow" />

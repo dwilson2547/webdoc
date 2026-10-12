@@ -42,8 +42,11 @@ export const MarkdownEditor = forwardRef<EditorHandle, {
   change.current = onChange;
 
   useEffect(() => {
+    // Toast UI gets an element of its own inside the one React renders: its
+    // destroy() removes DOM, and React must never find its nodes gone.
+    const el = host.current!.appendChild(document.createElement("div"));
     const e = new Editor({
-      el: host.current!,
+      el,
       initialValue: initial,
       initialEditType: "markdown",
       previewStyle: "vertical",
@@ -63,7 +66,7 @@ export const MarkdownEditor = forwardRef<EditorHandle, {
       events: { change: () => change.current?.(e.getMarkdown()) },
     });
     ed.current = e;
-    return () => { e.destroy(); ed.current = null; };
+    return () => { e.destroy(); el.remove(); ed.current = null; };
     // The editor owns its text after mount; `initial` only seeds it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -80,11 +83,12 @@ export function MarkdownView({ markdown }: { markdown: string }) {
   const host = useRef<HTMLDivElement>(null);
   const viewer = useRef<ReturnType<typeof Editor.factory> | null>(null);
   useEffect(() => {
+    const el = host.current!.appendChild(document.createElement("div"));
     viewer.current = Editor.factory({
-      el: host.current!, viewer: true, initialValue: markdown, usageStatistics: false,
+      el, viewer: true, initialValue: markdown, usageStatistics: false,
       theme: dark() ? "dark" : "light", plugins,
     });
-    return () => { viewer.current?.destroy(); viewer.current = null; };
+    return () => { viewer.current?.destroy(); el.remove(); viewer.current = null; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   useEffect(() => { viewer.current?.setMarkdown(markdown); }, [markdown]);

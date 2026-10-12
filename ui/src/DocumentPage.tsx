@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api, ApiError, errText, TAB_ID, type Doc, type DomainDetail, type Lease, type Me } from "./api";
 import { useDocEvents } from "./live";
 import { ShareDialog } from "./Share";
+import { ContributionHead, ContributionThread, useScanGate } from "./Contribution";
 import { HistoryPanel } from "./HistoryPanel";
 import { MarkdownEditor, MarkdownView, type EditorHandle } from "./markdown";
 import { Link, navigate } from "./router";
@@ -18,19 +19,22 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
   const [conflict, setConflict] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const gate = useScanGate();
   useEffect(() => { api.domain(doc.domain_id).then(setDomain, () => undefined); }, [doc.domain_id]);
 
   const save = async (base = doc.revision) => {
     setSaving(true);
     setError(null);
     try {
-      onSaved(await api.saveDocument(doc.id, {
+      // A published contribution's edits go public at once, past the secret scan.
+      await gate.run(async (ack) => onSaved(await api.saveDocument(doc.id, {
+        ack_warnings: ack,
         base_revision: base, title: title.trim(), body: editor.current!.getMarkdown(),
         tags: parseTags(tags), project_id: project || null,
         // Emptied fields are sent as null, which removes them.
         fields: Object.fromEntries([...new Set([...Object.keys(doc.fields), ...Object.keys(fields)])]
           .map((k) => [k, fields[k]?.trim() ? fields[k].trim() : null])),
-      }));
+      })));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) setConflict(e.body?.detail?.current ?? null);
       else setError(errText(e));
@@ -43,12 +47,12 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
     <div className="editing">
       <input className="title-input" value={title} maxLength={300} onChange={(e) => setTitle(e.target.value)} aria-label="Title" />
       <div className="row meta-edit">
-        <label>Project
+        {doc.kind !== "contribution" && <label>Project
           <select value={project} onChange={(e) => setProject(e.target.value)}>
             <option value="">None</option>
             {domain?.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
           </select>
-        </label>
+        </label>}
         <label className="grow">Tags <input value={tags} placeholder="comma, separated" onChange={(e) => setTags(e.target.value)} /></label>
       </div>
       {(doc.template || Object.keys(doc.fields).length > 0) && (
@@ -68,6 +72,7 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
         <button className="primary" disabled={saving || !title.trim()} onClick={() => void save()}>{saving ? "Saving…" : "Save"}</button>
         <button onClick={onCancel}>Cancel</button>
       </div>
+      {gate.dialog}
     </div>
   );
 }
@@ -111,6 +116,8 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
     } else if (e.type === "trashed" || e.type === "restored") {
       if (editing) setRemote(`${e.by} moved this document ${e.type === "trashed" ? "to the trash" : "out of the trash"}.`);
       else void load();
+    } else if (["published", "reply", "confirmation", "moderation"].includes(e.type)) {
+      if (!editing) void load();
     } else if (e.type === "purged") {
       setError(`${e.by} deleted this document permanently.`);
     }
@@ -205,6 +212,7 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
               {doc.tags.map((t) => <span key={t} className="tag small">{t}</span>)}
               <span>revision {doc.revision} · updated {ago(doc.updated_at)}</span>
             </div>
+            {doc.contribution && <ContributionHead doc={doc} onDoc={setDoc} onError={setError} />}
             <FieldsView fields={doc.fields} />
             {doc.template && (doc.template.check.missing_sections.length > 0 || doc.template.check.missing_fields.length > 0) && (
               <p className="muted check-note">
@@ -214,6 +222,7 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
               </p>
             )}
             <MarkdownView markdown={doc.body} />
+            {doc.contribution && <ContributionThread doc={doc} onDoc={setDoc} onError={setError} />}
           </>
         )}
       </div>

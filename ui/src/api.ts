@@ -53,15 +53,43 @@ export type Scope = "public" | "personal";
 export type Domain = {
   id: string; slug: string; name: string; description: string; scope: Scope; owner: string | null;
   role: Role | null; documents: number; last_activity: string;
+  accepts_contributions: boolean; contribution_types: string[]; can_contribute: boolean;
 };
 export type Project = { id: string; domain_id: string; slug: string; name: string; description: string };
-export type DomainDetail = Domain & { projects: Project[]; can: string[]; assignable: Role[]; tags: string[] };
+export type DomainDetail = Domain & {
+  projects: Project[]; can: string[]; assignable: Role[]; tags: string[]; contribution_type_names: Record<string, string>;
+};
 export type Home = { public: Domain[]; personal: Domain[]; shared: Domain[] };
-export type Kind = "note" | "document";
+export type Kind = "note" | "document" | "contribution";
+export type DocStatus = "published" | "draft" | "hidden";
 export type DocMeta = {
   id: string; kind: Kind; title: string; type: string | null; fields: Record<string, string>; domain_id: string; domain: string; project_id: string | null;
   project: string | null; tags: string[]; revision: number; created_at: string; updated_at: string;
-  deleted_at: string | null;
+  deleted_at: string | null; status: DocStatus;
+};
+export type ScanFinding = { kind: string; line: number; excerpt: string };
+export type ScanResult = { secrets: ScanFinding[]; warnings: ScanFinding[] };
+export type ReplyKind = "solution" | "didnt-work" | "comment";
+export const REPLY_KINDS: Record<ReplyKind, string> = { solution: "Another fix", "didnt-work": "Didn't work for me", comment: "Comment" };
+export type ReplyT = {
+  id: string; kind: ReplyKind; kind_text: string; status: "draft" | "published" | "withdrawn" | "hidden"; by: string | null;
+  client: string; created_at: string; published_at: string | null; confirmations: number; confirmed_by_me: boolean;
+  mine: boolean; body?: string; hidden_reason?: string;
+};
+export type Thread = {
+  status: DocStatus; locked: boolean; hidden_reason: string | null; published_at: string | null; author: string | null;
+  merged_into: { id: string; title: string } | null; accepted_reply_id: string | null;
+  confirmations: { by: string; environment: string; at: string }[]; confirmed_by_me: boolean; replies: ReplyT[];
+  can: { reply: boolean; confirm: boolean; publish: boolean; accept: boolean; moderate: boolean; report: boolean };
+};
+export type Counts = { drafts: number; proposals: number; reports: number; moderates: boolean };
+export type Drafts = {
+  contributions: { id: string; title: string; domain_id: string; domain: string; type: string | null; updated_at: string; by_client: string }[];
+  replies: { id: string; document_id: string; title: string; kind: ReplyKind; excerpt: string; client: string; created_at: string }[];
+};
+export type ReportT = {
+  id: string; document_id: string; title: string | null; domain_id: string; domain: string | null; reply_id: string | null;
+  reply_excerpt: string | null; reason: string; by: string | null; status: string; created_at: string;
 };
 export type FieldDef = { name: string; description: string; required: boolean };
 export type TemplateSection = { path: string[]; required: boolean; guidance: string };
@@ -73,7 +101,7 @@ export type TemplateSpec = {
 export type TemplateCheck = { missing_sections: string[]; missing_fields: string[] };
 export type Doc = DocMeta & {
   body: string; role: Role | null; can_edit: boolean; can_delete: boolean; can_purge: boolean; domain_scope: Scope;
-  lease: Lease | null; can_share: boolean;
+  lease: Lease | null; can_share: boolean; contribution?: Thread;
   template?: (TemplateSpec & { check: TemplateCheck }) | null;
 };
 export type Lease = {
@@ -85,7 +113,7 @@ export type DocEvent =
   | { type: "hello"; revision: number; lease: Lease | null }
   | { type: "revision"; revision: number; by: string; user_id: string; client: string; summary: string }
   | { type: "lease"; lease: Lease | null }
-  | { type: "trashed" | "restored" | "purged"; by: string };
+  | { type: "trashed" | "restored" | "purged" | "published" | "reply" | "confirmation" | "moderation"; by: string };
 export type Proposal = {
   id: string; kind: "domain.create" | "domain.update" | "template.create" | "template.update";
   status: "pending" | "approved" | "rejected" | "withdrawn"; payload: any; rationale: string; scope: Scope;
@@ -147,7 +175,7 @@ export const api = {
   createDocument: (body: { domain_id: string; kind: Kind; title: string; body: string; tags: string[]; project_id: string | null; type?: string | null; fields?: Record<string, string> }) =>
     call<Doc>("POST", "/api/documents", body),
   document: (id: string) => call<Doc>("GET", `/api/documents/${id}`),
-  saveDocument: (id: string, body: { base_revision: number; title?: string; body?: string; tags?: string[]; fields?: Record<string, string | null>; project_id?: string | null; domain_id?: string }) =>
+  saveDocument: (id: string, body: { base_revision: number; title?: string; body?: string; tags?: string[]; fields?: Record<string, string | null>; project_id?: string | null; domain_id?: string; ack_warnings?: boolean }) =>
     call<Doc>("PUT", `/api/documents/${id}`, body),
   trash: (id: string) => call("DELETE", `/api/documents/${id}`),
   untrash: (id: string) => call<Doc>("POST", `/api/documents/${id}/restore`),
@@ -167,6 +195,25 @@ export const api = {
   shares: (id: string) => call<{ shares: ShareLink[] }>("GET", `/api/documents/${id}/shares`).then((r) => r.shares),
   createShare: (id: string) => call<ShareLink>("POST", `/api/documents/${id}/shares`),
   revokeShare: (shareId: string) => call("DELETE", `/api/shares/${shareId}`),
+  counts: () => call<Counts>("GET", "/api/counts"),
+  contributionSettings: (domainId: string, accepts: boolean, types: string[]) =>
+    call<DomainDetail>("PATCH", `/api/domains/${domainId}/contributions`, { accepts, types }),
+  scan: (id: string) => call<ScanResult>("GET", `/api/documents/${id}/scan`),
+  publish: (id: string, ack_warnings = false) => call<Doc>("POST", `/api/documents/${id}/publish`, { ack_warnings }),
+  postReply: (id: string, kind: ReplyKind, body: string, ack_warnings = false) =>
+    call<Doc>("POST", `/api/documents/${id}/replies`, { kind, body, ack_warnings }),
+  publishReply: (replyId: string, ack_warnings = false) => call<Doc>("POST", `/api/replies/${replyId}/publish`, { ack_warnings }),
+  withdrawReply: (replyId: string) => call<Doc>("DELETE", `/api/replies/${replyId}`),
+  moderateReply: (replyId: string, hidden: boolean, reason = "") => call<Doc>("POST", `/api/replies/${replyId}/moderate`, { hidden, reason }),
+  accept: (id: string, reply_id: string | null) => call<Doc>("POST", `/api/documents/${id}/accept`, { reply_id }),
+  confirm: (id: string, reply_id: string | null, environment = "") => call<Doc>("POST", `/api/documents/${id}/confirm`, { reply_id, environment }),
+  unconfirm: (id: string, reply_id: string | null) => call<Doc>("DELETE", `/api/documents/${id}/confirm` + qs({ reply_id })),
+  moderate: (id: string, action: "hide" | "unhide" | "lock" | "unlock" | "duplicate" | "unduplicate", reason = "", of?: string) =>
+    call<Doc>("POST", `/api/documents/${id}/moderate`, { action, reason, of }),
+  report: (document_id: string, reason: string, reply_id?: string) => call("POST", "/api/reports", { document_id, reason, reply_id }),
+  reports: () => call<{ reports: ReportT[]; moderates: boolean }>("GET", "/api/reports"),
+  resolveReport: (id: string, action: "dismiss" | "hide", note = "") => call<ReportT>("POST", `/api/reports/${id}/resolve`, { action, note }),
+  drafts: () => call<Drafts>("GET", "/api/drafts"),
   shared: (token: string) => call<SharedDoc>("GET", `/api/s/${encodeURIComponent(token)}`),
   diff: (id: string, a: number, b?: number) => call<{ diff: string }>("GET", `/api/documents/${id}/diff` + qs({ a, b })).then((r) => r.diff),
   tags: (domain?: string) => call<{ tags: { tag: string; count: number }[] }>("GET", "/api/tags" + qs({ domain })).then((r) => r.tags),

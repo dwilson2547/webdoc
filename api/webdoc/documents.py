@@ -288,7 +288,7 @@ def out(doc: Document, *, body: bool = True, role: str | None = None) -> dict:
          "domain": doc.domain.name, "project_id": doc.project_id,
          "project": doc.project.name if doc.project else None, "tags": doc.tags,
          "type": doc.template_type, "fields": dict(doc.fields or {}),
-         "revision": doc.revision, "created_at": doc.created_at.isoformat(),
+         "revision": doc.revision, "status": doc.status, "created_at": doc.created_at.isoformat(),
          "updated_at": doc.updated_at.isoformat(),
          "deleted_at": doc.deleted_at.isoformat() if doc.deleted_at else None}
     if body:
