@@ -25,6 +25,8 @@ class ProposalError(ValueError):
 
 def _file(s: Session, actor: Actor, kind: str, owner_key: str, payload: dict, rationale: str,
           domain_id: str | None = None, target_id: str | None = None) -> Proposal:
+    if not access.is_editor(actor.user):
+        raise ProposalError("viewers can't propose changes; an admin can make you an editor")
     rationale = (rationale or "").strip()
     if not rationale:
         raise ProposalError("say why (rationale): the person approving reads it")

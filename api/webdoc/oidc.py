@@ -115,20 +115,29 @@ def finish(provider: Provider, settings: Settings, flow_cookie: str, code: str,
     return provider.verify(tokens.get("id_token") or "", nonce)
 
 
-def resolve_user(s: Session, claims: dict, admin_group: str | None = None) -> User:
+def resolve_user(s: Session, claims: dict, admin_group: str | None = None,
+                 editor_group: str | None = None) -> User:
+    """The local account for an authentik identity, with admin and editor
+    status synced from its groups at every sign-in (design §4)."""
     issuer, subject = claims["iss"], claims["sub"]
+    # authentik puts group names in the `groups` claim (profile scope).
+    groups = claims.get("groups") or []
+    admin = bool(admin_group) and admin_group in groups
+    editor = admin or not editor_group or editor_group in groups
     user = s.scalar(select(User).join(UserIdentity).where(
         UserIdentity.issuer == issuer, UserIdentity.subject == subject))
     if user is None:
         wanted = (claims.get("preferred_username")
                   or (claims.get("email") or "").split("@")[0] or "user")
-        user = auth.create_user(s, wanted)
+        user = auth.create_user(s, wanted, editor)
         s.add(UserIdentity(user_id=user.id, issuer=issuer, subject=subject))
         log.warning("oidc: created user %s", user.username)
-    if admin_group:
-        # authentik puts group names in the `groups` claim (profile scope).
-        admin = admin_group in (claims.get("groups") or [])
-        if admin != user.is_admin:
-            log.warning("oidc: %s admin=%s", user.username, admin)
-            user.is_admin = admin
+    if admin_group and admin != user.is_admin:
+        log.warning("oidc: %s admin=%s", user.username, admin)
+        user.is_admin = admin
+    if editor != user.is_editor:
+        log.warning("oidc: %s editor=%s", user.username, editor)
+        user.is_editor = editor
+    if editor:
+        auth.ensure_personal_domain(s, user)
     return user

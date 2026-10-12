@@ -17,13 +17,13 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from . import access, documents, events, scan, templates
 from .activity import Actor, record
-from .models import (Confirmation, Document, DocumentRevision, Domain, Reply, Report, User,
-                     utcnow)
+from .models import (Confirmation, Document, DocumentRevision, Domain, Event, Reply, Report,
+                     User, utcnow)
 
 REPLY_KINDS = {"solution": "Another fix", "didnt-work": "Didn't work for me",
                "comment": "Comment"}
@@ -79,8 +79,11 @@ def configure(s: Session, actor: Actor, d: Domain, accepts: bool, types: list[st
     return d
 
 
+VIEWER = "viewers can read and report; posting, replying and confirming need editor access"
+
+
 def can_contribute(user: User | None, d: Domain) -> bool:
-    return user is not None and d.scope == "public" and d.accepts_contributions
+    return access.is_editor(user) and d.scope == "public" and d.accepts_contributions
 
 
 # --- drafting and publishing ----------------------------------------------------
@@ -118,6 +121,8 @@ def possible_duplicates(s: Session, emb, d: Domain, title: str, body: str,
 
 def check_draft(d: Domain, user: User, type: str | None) -> str | None:
     """Whether this user may draft here with this type; returns the type."""
+    if not access.is_editor(user):
+        raise ContribError(VIEWER)
     if not can_contribute(user, d):
         raise ContribError(f"{d.name} doesn't take contributions")
     type = (type or "").strip().lower() or None
@@ -182,6 +187,11 @@ def check_edit(doc: Document, body: str | None, title: str | None, ack_warnings:
 
 # --- replies --------------------------------------------------------------------
 
+def _participant(user: User) -> None:
+    if not access.is_editor(user):
+        raise ContribError(VIEWER)
+
+
 def _open_for_discussion(doc: Document) -> None:
     if doc.kind != "contribution" or doc.status != "published" or doc.deleted_at is not None:
         raise ContribError("replies and confirmations are for published contributions")
@@ -193,6 +203,7 @@ def _open_for_discussion(doc: Document) -> None:
 def add_reply(s: Session, actor: Actor, doc: Document, kind: str, body: str,
               publish_now: bool = False, ack_warnings: bool = False) -> Reply:
     """A reply; agents draft (publish_now is for the web UI, past the scan)."""
+    _participant(actor.user)
     _open_for_discussion(doc)
     if kind not in REPLY_KINDS:
         raise ContribError("kind must be one of " + ", ".join(REPLY_KINDS))
@@ -240,6 +251,7 @@ def reply_for(s: Session, user: User, reply_id: str) -> tuple[Reply, Document]:
 
 def publish_reply(s: Session, actor: Actor, r: Reply, doc: Document,
                   ack_warnings: bool = False) -> dict:
+    _participant(actor.user)
     if r.status != "draft":
         raise ContribError("only a draft reply can be published")
     if r.author_id != actor.user.id:
@@ -300,6 +312,7 @@ def accept(s: Session, actor: Actor, doc: Document, r: Reply | None) -> None:
 
 def confirm(s: Session, actor: Actor, doc: Document, r: Reply | None = None,
             environment: str = "") -> Confirmation:
+    _participant(actor.user)
     _open_for_discussion(doc)
     if r is not None and (r.document_id != doc.id or r.status != "published"):
         raise ContribError("that reply isn't a published reply to this contribution")
@@ -349,6 +362,10 @@ def _moderator(s: Session, user: User, doc: Document) -> None:
 
 def hide(s: Session, actor: Actor, doc: Document, hidden: bool, reason: str = "") -> None:
     _moderator(s, actor.user, doc)
+    _set_hidden(s, actor, doc, hidden, reason)
+
+
+def _set_hidden(s: Session, actor: Actor, doc: Document, hidden: bool, reason: str) -> None:
     if doc.status == "draft":
         raise ContribError("drafts aren't public; there's nothing to hide")
     doc.status = "hidden" if hidden else "published"
@@ -397,8 +414,15 @@ def mark_duplicate(s: Session, actor: Actor, doc: Document, of: Document | None)
 # --- reports --------------------------------------------------------------------
 
 def report(s: Session, actor: Actor, doc: Document, reason: str, r: Reply | None = None) -> Report:
-    if doc.domain.scope != "public" or doc.status == "draft":
-        raise ContribError("reports are for published documents in public domains")
+    """Anyone who can read a published document can report it. Reports in a
+    public domain go to its moderators and admins; reports on a personal
+    domain's document go to admins, who may then open that one document
+    (design §4), and to nobody in the domain."""
+    if doc.status == "draft":
+        raise ContribError("drafts aren't public; there's nothing to report")
+    if doc.domain.scope != "public" and (doc.domain.owner_user_id == actor.user.id
+                                         or doc.created_by == actor.user.id):
+        raise ContribError("this is your own document")
     reason = (reason or "").strip()
     if not reason:
         raise ContribError("say what's wrong; moderators read it")
@@ -406,39 +430,125 @@ def report(s: Session, actor: Actor, doc: Document, reason: str, r: Reply | None
         Report.reporter_id == actor.user.id, Report.created_at > _since("report_user"))) or 0
     _limit(n, "report_user", "reports")
     row = Report(domain_id=doc.domain_id, document_id=doc.id, reply_id=r.id if r else None,
-                 reporter_id=actor.user.id, reason=reason[:MAX_REASON])
+                 reporter_id=actor.user.id, reason=reason[:MAX_REASON], revision=doc.revision)
     s.add(row)
     s.flush()
     # Reports are between the reporter and the moderators: no public event.
     return row
 
 
-def open_reports(s: Session, user: User) -> list[Report]:
+def _reports_for(s: Session, user: User):
+    """Reports this user handles: their moderated public domains', and as an
+    admin, those on personal documents too."""
     ids = access.moderated_domain_ids(s, user)
-    if not ids:
+    cond = Report.domain_id.in_(ids) if ids else None
+    if user.is_admin:
+        personal = Report.domain_id.in_(select(Domain.id).where(Domain.scope != "public"))
+        cond = personal if cond is None else or_(cond, personal)
+    return cond
+
+
+def handles_reports(s: Session, user: User) -> bool:
+    return user.is_admin or bool(access.moderated_domain_ids(s, user))
+
+
+def open_reports(s: Session, user: User) -> list[Report]:
+    cond = _reports_for(s, user)
+    if cond is None:
         return []
-    return list(s.scalars(select(Report).where(Report.status == "open",
-                                               Report.domain_id.in_(ids))
+    return list(s.scalars(select(Report).where(Report.status == "open", cond)
                           .order_by(Report.created_at)))
+
+
+def recent_decisions(s: Session, user: User, limit: int = 30) -> list[Report]:
+    cond = _reports_for(s, user)
+    if cond is None:
+        return []
+    return list(s.scalars(select(Report).where(Report.status != "open", cond)
+                          .order_by(Report.decided_at.desc()).limit(limit)))
+
+
+def report_for(s: Session, user: User, report_id: str) -> Report:
+    rep = s.get(Report, report_id)
+    cond = _reports_for(s, user)
+    if rep is None or cond is None or not s.scalar(
+            select(func.count()).select_from(Report).where(Report.id == rep.id, cond)):
+        raise access.Denied("report not found")
+    return rep
+
+
+def _may_handle(s: Session, user: User, doc: Document) -> None:
+    if doc.domain.scope == "public":
+        _moderator(s, user, doc)
+    elif not user.is_admin:
+        raise access.Denied("only admins handle reports on personal documents", 403)
+
+
+def review(s: Session, actor: Actor, rep: Report) -> dict:
+    """The reported document, for whoever handles the report, while it is
+    open. For a personal document this is an admin's only way in, and the
+    owner sees in their activity that it happened."""
+    doc = s.get(Document, rep.document_id)
+    _may_handle(s, actor.user, doc)
+    if rep.status != "open":
+        raise ContribError("this report was handled; the document is no longer open for review")
+    out = {"report": report_out(s, rep), "title": doc.title, "body": doc.body,
+           "fields": dict(doc.fields or {}), "tags": doc.tags, "kind": doc.kind,
+           "status": doc.status, "revision": doc.revision, "domain": doc.domain.name,
+           "scope": doc.domain.scope,
+           "owner": doc.domain.owner.username if doc.domain.owner else None,
+           "updated_at": doc.updated_at.isoformat(), "reported": None}
+    if rep.revision and rep.revision != doc.revision:
+        old = s.scalar(select(DocumentRevision).where(DocumentRevision.document_id == doc.id,
+                                                      DocumentRevision.revision == rep.revision))
+        if old is not None:
+            out["reported"] = {"revision": old.revision, "title": old.title, "body": old.body}
+    if doc.domain.scope != "public":
+        seen = s.scalar(select(Event.id).where(Event.action == "report.review",
+                                               Event.actor_id == actor.user.id,
+                                               Event.target_id == doc.id,
+                                               Event.at >= rep.created_at))
+        if seen is None:
+            record(s, actor, "report.review", "document", doc.id,
+                   f"an admin ({actor.user.username}) opened {doc.title} to review a report",
+                   doc.domain_id)
+    return out
 
 
 def resolve_report(s: Session, actor: Actor, rep: Report, action: str, note: str = "") -> Report:
     """dismiss, or hide what was reported (the contribution or the reply)."""
     doc = s.get(Document, rep.document_id)
-    _moderator(s, actor.user, doc)
+    _may_handle(s, actor.user, doc)
     if rep.status != "open":
         raise ContribError("this report was already handled")
     if action == "hide":
         if rep.reply_id:
             hide_reply(s, actor, s.get(Reply, rep.reply_id), doc, True, note or rep.reason)
         else:
-            hide(s, actor, doc, True, note or rep.reason)
+            _set_hidden(s, actor, doc, True, note or rep.reason)
         rep.status = "actioned"
     elif action == "dismiss":
         rep.status = "dismissed"
     else:
         raise ContribError("action must be dismiss or hide")
     rep.decided_by, rep.decided_at, rep.note = actor.user.id, utcnow(), (note or "")[:MAX_REASON]
+    return rep
+
+
+def undo_report(s: Session, actor: Actor, rep: Report) -> Report:
+    """Reverse a hide made from a report (the report stays, as dismissed)."""
+    doc = s.get(Document, rep.document_id)
+    _may_handle(s, actor.user, doc)
+    if rep.status != "actioned":
+        raise ContribError("only a report that hid something can be undone")
+    if rep.reply_id:
+        r = s.get(Reply, rep.reply_id)
+        if r is not None and r.status == "hidden":
+            hide_reply(s, actor, r, doc, False)
+    elif doc.status == "hidden":
+        _set_hidden(s, actor, doc, False, "")
+    rep.status, rep.decided_by, rep.decided_at = "dismissed", actor.user.id, utcnow()
+    rep.note = ((rep.note + "; ") if rep.note else "") + "hide undone"
     return rep
 
 
@@ -449,7 +559,9 @@ def report_out(s: Session, rep: Report) -> dict:
             "domain_id": rep.domain_id, "domain": doc.domain.name if doc else None,
             "reply_id": rep.reply_id, "reply_excerpt": r.body[:300] if r else None,
             "reason": rep.reason, "by": rep.reporter.username if rep.reporter else None,
-            "status": rep.status, "created_at": rep.created_at.isoformat()}
+            "status": rep.status, "created_at": rep.created_at.isoformat(),
+            "scope": doc.domain.scope if doc else None, "note": rep.note,
+            "decided_at": rep.decided_at.isoformat() if rep.decided_at else None}
 
 
 # --- reading --------------------------------------------------------------------
@@ -486,7 +598,7 @@ def thread(s: Session, user: User | None, doc: Document) -> dict:
         if visible:
             replies.append(reply_out(r, by_target.get(r.id, []), user, moderator))
     merged = s.get(Document, doc.merged_into_id) if doc.merged_into_id else None
-    signed_in = user is not None
+    signed_in = access.is_editor(user)
     open_ = doc.status == "published" and not doc.locked and not doc.merged_into_id
     own = [c for c in by_target.get("", [])]
     return {
@@ -503,7 +615,8 @@ def thread(s: Session, user: User | None, doc: Document) -> dict:
                 and doc.created_by != (user.id if user else None),
                 "publish": doc.status == "draft" and signed_in and doc.created_by == user.id,
                 "accept": signed_in and (doc.created_by == user.id or moderator),
-                "moderate": moderator, "report": signed_in and doc.status == "published"},
+                "moderate": moderator,
+                "report": user is not None and doc.status == "published"},
     }
 
 

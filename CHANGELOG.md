@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0 — 2026-10-12
+
+Viewers by default, and reports on personal documents (the two items deferred from 0.2.0).
+
+- New users are viewers: they read and search public domains and anything shared with them, and
+  report problems, but create nothing and get no personal domain. Members of the authentik group
+  `EDITOR_GROUP` (chart `oidc.editorGroup`, default `webdoc-editors`) are editors; admins are
+  editors too. It is synced at every sign-in. A viewer's role is capped at reader everywhere,
+  including domains they own or were granted more on; promotion gives them a "Notes" domain.
+  In contribution domains viewers read and report only. Existing accounts became editors.
+- Reports on personal documents: anyone a document is shared with can report it. These go to
+  admins only, who can open that one document from the Moderation page while the report is open
+  (current text, and the reported revision if it changed since) and nothing else in the domain;
+  the owner sees in their activity that an admin opened it. Hiding takes it away from everyone
+  but the owner, who sees the reason. Recent decisions can be undone.
+
 ## 0.5.0 — 2026-10-12
 
 Phase 5 (design §14): public contribution domains.

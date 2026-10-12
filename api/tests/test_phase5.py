@@ -297,7 +297,7 @@ def test_reports(forum):
     assert TestClient(app).post("/api/reports", json={"document_id": doc["id"], "reason": "x"},
                                 headers=H).status_code == 401
     # Reporters don't see the queue; moderators do.
-    assert alice.get("/api/reports").json() == {"reports": [], "moderates": False}
+    assert alice.get("/api/reports").json() == {"reports": [], "recent": [], "moderates": False}
     reps = admin.get("/api/reports").json()["reports"]
     assert reps[0]["reason"] == "contains spam" and reps[0]["by"] == "alice"
     assert admin.get("/api/counts").json()["reports"] == 1
@@ -315,12 +315,12 @@ def test_reports(forum):
     rep = carol.get("/api/reports").json()["reports"][0]
     assert carol.post(f"/api/reports/{rep['id']}/resolve", json={"action": "dismiss"},
                       headers=H).json()["status"] == "dismissed"
-    # Personal documents aren't reportable yet.
+    # Nobody reports their own document.
     mine = bob.get("/api/home").json()["personal"][0]
     x = bob.post("/api/documents", json={"domain_id": mine["id"], "title": "p", "body": "q"},
                  headers=H).json()
-    assert bob.post("/api/reports", json={"document_id": x["id"], "reason": "x"},
-                    headers=H).status_code == 422
+    r = bob.post("/api/reports", json={"document_id": x["id"], "reason": "x"}, headers=H)
+    assert r.status_code == 422 and "your own" in r.json()["detail"]
 
 
 # --- rate limits ----------------------------------------------------------------

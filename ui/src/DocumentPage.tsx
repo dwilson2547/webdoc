@@ -165,6 +165,13 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
     await api.trash(doc.id).then(() => navigate(`/domain/${doc.domain_id}`), (e) => setError(errText(e)));
   };
   const untrash = async () => setDoc(await api.untrash(doc.id));
+  const report = async () => {
+    const reason = prompt(doc.domain_scope === "public"
+      ? "What's wrong with it? Moderators read this."
+      : "What's wrong with it? An admin reads this and may open this document (only this one) to review it.");
+    if (!reason?.trim()) return;
+    await api.report(doc.id, reason.trim()).then(() => alert("Reported. Thanks."), (e) => setError(errText(e)));
+  };
   const self = !!other && other.kind === "ui" && !!me && other.user_id === me.id;
   const whoHolds = other && (other.kind === "agent" ? `${other.label.replace(" via token:", " via ")} (an agent)` : other.label);
 
@@ -180,6 +187,9 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
             In the trash since {new Date(doc.deleted_at).toLocaleString()}.
             {doc.can_delete && <button onClick={() => void untrash()}>Restore</button>}
           </div>
+        )}
+        {doc.status === "hidden" && !doc.contribution && (
+          <div className="banner warn">Hidden after a report{doc.hidden_reason ? `: ${doc.hidden_reason}` : ""}. Only you can see it now.</div>
         )}
         {other && (
           <div className="banner lease">
@@ -204,6 +214,7 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
               {doc.can_edit && !doc.deleted_at && !other && <button className="primary" onClick={() => void startEdit()}>Edit</button>}
               <button onClick={() => setHistory((h) => !h)}>History</button>
               {doc.can_share && !doc.deleted_at && <button onClick={() => setSharing(true)}>Share</button>}
+              {doc.can_report && !doc.contribution && <button className="flat-btn" onClick={() => void report()}>Report</button>}
               <a className="button" href={`/api/documents/${doc.id}/export`}>.md</a>
               {doc.can_delete && !doc.deleted_at && <button onClick={() => void trash()}>Delete</button>}
             </div>

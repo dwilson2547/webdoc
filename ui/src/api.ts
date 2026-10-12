@@ -46,7 +46,7 @@ const qs = (o: Record<string, string | number | boolean | null | undefined>) => 
   return s ? "?" + s : "";
 };
 
-export type Me = { id: string; username: string; is_admin: boolean };
+export type Me = { id: string; username: string; is_admin: boolean; is_editor: boolean };
 export type Config = { oidc: boolean; dev_login: boolean; version: string; max_document_bytes: number };
 export type Role = "admin" | "owner" | "moderator" | "editor" | "reader";
 export type Scope = "public" | "personal";
@@ -90,6 +90,12 @@ export type Drafts = {
 export type ReportT = {
   id: string; document_id: string; title: string | null; domain_id: string; domain: string | null; reply_id: string | null;
   reply_excerpt: string | null; reason: string; by: string | null; status: string; created_at: string;
+  scope: "public" | "personal" | null; note: string; decided_at: string | null;
+};
+export type ReportReview = {
+  report: ReportT; title: string; body: string; fields: Record<string, string>; tags: string[]; kind: Kind; status: DocStatus;
+  revision: number; domain: string; scope: string; owner: string | null; updated_at: string;
+  reported: { revision: number; title: string; body: string } | null;
 };
 export type FieldDef = { name: string; description: string; required: boolean };
 export type TemplateSection = { path: string[]; required: boolean; guidance: string };
@@ -101,7 +107,7 @@ export type TemplateSpec = {
 export type TemplateCheck = { missing_sections: string[]; missing_fields: string[] };
 export type Doc = DocMeta & {
   body: string; role: Role | null; can_edit: boolean; can_delete: boolean; can_purge: boolean; domain_scope: Scope;
-  lease: Lease | null; can_share: boolean; contribution?: Thread;
+  lease: Lease | null; can_share: boolean; contribution?: Thread; can_report: boolean; hidden_reason: string | null;
   template?: (TemplateSpec & { check: TemplateCheck }) | null;
 };
 export type Lease = {
@@ -154,7 +160,7 @@ export const api = {
   config: () => call<Config>("GET", "/api/config"),
   me: () => call<Me>("GET", "/api/me"),
   logout: () => call("POST", "/api/auth/logout"),
-  devLogin: (name: string, admin: boolean) => call<Me>("POST", "/api/auth/dev-login", { name, admin }),
+  devLogin: (name: string, admin: boolean, editor = true) => call<Me>("POST", "/api/auth/dev-login", { name, admin, editor }),
   home: () => call<Home>("GET", "/api/home"),
   createDomain: (body: { name: string; slug?: string; description: string; scope: Scope }) =>
     call<Domain>("POST", "/api/domains", body),
@@ -211,7 +217,9 @@ export const api = {
   moderate: (id: string, action: "hide" | "unhide" | "lock" | "unlock" | "duplicate" | "unduplicate", reason = "", of?: string) =>
     call<Doc>("POST", `/api/documents/${id}/moderate`, { action, reason, of }),
   report: (document_id: string, reason: string, reply_id?: string) => call("POST", "/api/reports", { document_id, reason, reply_id }),
-  reports: () => call<{ reports: ReportT[]; moderates: boolean }>("GET", "/api/reports"),
+  reports: () => call<{ reports: ReportT[]; recent: ReportT[]; moderates: boolean }>("GET", "/api/reports"),
+  reviewReport: (id: string) => call<ReportReview>("GET", `/api/reports/${id}/review`),
+  undoReport: (id: string) => call<ReportT>("POST", `/api/reports/${id}/undo`),
   resolveReport: (id: string, action: "dismiss" | "hide", note = "") => call<ReportT>("POST", `/api/reports/${id}/resolve`, { action, note }),
   drafts: () => call<Drafts>("GET", "/api/drafts"),
   shared: (token: string) => call<SharedDoc>("GET", `/api/s/${encodeURIComponent(token)}`),

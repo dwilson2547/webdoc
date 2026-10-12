@@ -23,12 +23,14 @@ function signinError(): string | null {
 function SignIn({ config, onDone }: { config: Config; onDone: () => void }) {
   const [name, setName] = useState("dev");
   const [admin, setAdmin] = useState(false);
+  const [viewer, setViewer] = useState(false);
   if (config.oidc) return <a className="button primary" href="/api/auth/oidc/login">Sign in</a>;
   if (!config.dev_login) return null;
   return (
-    <form className="row" onSubmit={(e) => { e.preventDefault(); void api.devLogin(name, admin).then(onDone); }}>
+    <form className="row" onSubmit={(e) => { e.preventDefault(); void api.devLogin(name, admin, !viewer).then(onDone); }}>
       <input value={name} onChange={(e) => setName(e.target.value)} aria-label="Dev user" size={8} />
       <label className="check"><input type="checkbox" checked={admin} onChange={(e) => setAdmin(e.target.checked)} />admin</label>
+      <label className="check"><input type="checkbox" checked={viewer} onChange={(e) => setViewer(e.target.checked)} />viewer</label>
       <button type="submit">Dev sign-in</button>
     </form>
   );
@@ -104,10 +106,10 @@ export default function App() {
           <>
             {(counts?.drafts ?? 0) > 0 && <Link to="/drafts">Drafts{badge(counts?.drafts)}</Link>}
             {counts?.moderates && <Link to="/moderation">Moderation{badge(counts.reports)}</Link>}
-            <Link to="/proposals">Proposals{badge(counts?.proposals)}</Link>
+            {(me.is_editor || (counts?.proposals ?? 0) > 0) && <Link to="/proposals">Proposals{badge(counts?.proposals)}</Link>}
             <Link to="/templates">Types</Link>
             <Link to="/agents">Agents</Link>
-            <span className="muted">{me.username}{me.is_admin && " (admin)"}</span>
+            <span className="muted">{me.username}{me.is_admin ? " (admin)" : !me.is_editor && " (viewer)"}</span>
             <button onClick={() => void logout()}>Sign out</button>
           </>
         ) : <SignIn config={config} onDone={loadMe} />}

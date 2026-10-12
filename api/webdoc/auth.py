@@ -52,16 +52,25 @@ def unique_username(s: Session, wanted: str) -> str:
     return name
 
 
-def create_user(s: Session, wanted: str) -> User:
-    """A new account with a first personal domain, so there is somewhere to write."""
-    from . import domains
-    from .activity import Actor
-    user = User(username=unique_username(s, wanted))
+def create_user(s: Session, wanted: str, editor: bool = True) -> User:
+    """A new account. An editor gets a first personal domain, so there is
+    somewhere to write; a viewer gets one if they're made an editor later."""
+    user = User(username=unique_username(s, wanted), is_editor=editor)
     s.add(user)
     s.flush()
+    if editor:
+        ensure_personal_domain(s, user)
+    return user
+
+
+def ensure_personal_domain(s: Session, user: User) -> None:
+    from . import domains
+    from .activity import Actor
+    from .models import Domain
+    if s.scalar(select(Domain.id).where(Domain.owner_key == domains.personal_key(user))):
+        return
     domains.create(s, Actor(user), domains.personal_key(user), "Notes", "notes",
                    "General notes; rename or add domains as your taxonomy grows.")
-    return user
 
 
 def start_session(s: Session, user: User, settings: Settings, response: Response) -> None:

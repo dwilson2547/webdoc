@@ -129,7 +129,8 @@ def out(s: Session, d: Domain, user: User | None, stats=None) -> dict:
             "role": access.role_on(s, user, d), "documents": n,
             "accepts_contributions": d.accepts_contributions,
             "contribution_types": list(d.contribution_types or []),
-            "can_contribute": user is not None and d.scope == "public" and d.accepts_contributions,
+            "can_contribute": (access.is_editor(user) and d.scope == "public"
+                               and d.accepts_contributions),
             "last_activity": (last or d.updated_at).isoformat()}
 
 

@@ -40,7 +40,21 @@ class Denied(Exception):
         self.status = status
 
 
+def is_editor(user: User | None) -> bool:
+    """Editors (and admins) create and write; viewers only read and report."""
+    return user is not None and (user.is_admin or user.is_editor)
+
+
 def role_on(s: Session, user: User | None, d: Domain) -> str | None:
+    """The user's role on a domain. A viewer's is capped at reader, wherever
+    they own or were granted more (design §4)."""
+    role = _role_on(s, user, d)
+    if role is not None and role != "reader" and not is_editor(user):
+        return "reader"
+    return role
+
+
+def _role_on(s: Session, user: User | None, d: Domain) -> str | None:
     """Admins control public domains; personal domains are their owner's and
     whoever they share with, admins included (design §4: admins review a
     personal document only through a report, which is not built yet)."""

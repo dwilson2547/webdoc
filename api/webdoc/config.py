@@ -16,6 +16,9 @@ class Settings:
     oidc_client_id: str | None = None
     oidc_client_secret: str | None = None
     admin_group: str | None = None
+    editor_group: str | None = None
+    """authentik group whose members are editors (design §4); everyone else is
+    a viewer. Unset: everyone is an editor, as before 0.6.0."""
     """authentik group whose members are webdoc admins (design §4). Checked at
     every sign-in, so removing someone from the group demotes them next time."""
     session_ttl_days: int = 30
@@ -55,6 +58,7 @@ class Settings:
             oidc_client_id=env.get("OIDC_CLIENT_ID") or None,
             oidc_client_secret=env.get("OIDC_CLIENT_SECRET") or None,
             admin_group=(env.get("ADMIN_GROUP") or "").strip() or None,
+            editor_group=(env.get("EDITOR_GROUP") or "").strip() or None,
             session_ttl_days=int(env.get("SESSION_TTL_DAYS") or cls.session_ttl_days),
             max_document_bytes=int(env.get("MAX_DOCUMENT_BYTES") or cls.max_document_bytes),
             static_dir=env.get("STATIC_DIR") or None,

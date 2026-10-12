@@ -49,6 +49,8 @@ spec:
                   key: client_secret
             - name: ADMIN_GROUP
               value: {{ .Values.oidc.adminGroup | quote }}
+            - name: EDITOR_GROUP
+              value: {{ .Values.oidc.editorGroup | default "" | quote }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

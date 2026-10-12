@@ -78,6 +78,7 @@ class NameIn(BaseModel):
 class DevLoginIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     admin: bool = False
+    editor: bool = True
 
 
 class DomainIn(BaseModel):
@@ -311,7 +312,8 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
 
     @app.get("/api/me")
     def me(user: User = Depends(user_dep)):
-        return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
+        return {"id": user.id, "username": user.username, "is_admin": user.is_admin,
+                "is_editor": access.is_editor(user)}
 
     @app.post("/api/auth/logout")
     def logout(request: Request, response: Response, s: Session = Depends(session)):
@@ -355,7 +357,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         try:
             claims = oidc.finish(provider, settings, request.cookies.get(oidc.FLOW_COOKIE, ""),
                                  code, state)
-            user = oidc.resolve_user(s, claims, settings.admin_group)
+            user = oidc.resolve_user(s, claims, settings.admin_group, settings.editor_group)
             auth.start_session(s, user, settings, res)
         except oidc.SignInRefused:
             return RedirectResponse("/?signin_error=refused", 302)
@@ -372,9 +374,12 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                 raise HTTPException(403, "missing X-Webdoc header")
             name = auth.USERNAME_RE.sub("", body.name.lower())[:60] or "dev"
             user = s.scalar(select(User).where(User.username == name)) or auth.create_user(s, name)
-            user.is_admin = body.admin
+            user.is_admin, user.is_editor = body.admin, body.editor or body.admin
+            if user.is_editor:
+                auth.ensure_personal_domain(s, user)
             auth.start_session(s, user, settings, response)
-            return {"id": user.id, "username": user.username, "is_admin": user.is_admin}
+            return {"id": user.id, "username": user.username, "is_admin": user.is_admin,
+                    "is_editor": access.is_editor(user)}
 
     # --- home and domains ---------------------------------------------------
 
@@ -432,6 +437,8 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     def create_domain(body: DomainIn, user: User = Depends(user_dep), s: Session = Depends(session)):
         if body.scope == "public" and not user.is_admin:
             raise HTTPException(403, "only admins create public domains")
+        if not access.is_editor(user):
+            raise HTTPException(403, "viewers can't create domains; an admin can make you an editor")
         owner = PLATFORM if body.scope == "public" else domains.personal_key(user)
         d = guard(domains.create, s, actor_for(user), owner, body.name, body.slug, body.description)
         return domains.out(s, d, user)
@@ -578,6 +585,12 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         o["can_edit"] = access.doc_allows(user, doc, role, access.WRITE) and doc.deleted_at is None
         o["can_delete"] = access.doc_allows(user, doc, role, access.DELETE)
         o["status"] = doc.status
+        # Readers may report what they can see, except their own work.
+        o["can_report"] = (user is not None and doc.status == "published"
+                           and doc.created_by != user.id
+                           and not (doc.domain.scope != "public"
+                                    and doc.domain.owner_user_id == user.id))
+        o["hidden_reason"] = doc.hidden_reason if doc.status == "hidden" else None
         if doc.kind == "contribution":
             o["contribution"] = contributions.thread(s, user, doc)
         if doc.template_type:
@@ -869,15 +882,30 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     def list_reports(user: User = Depends(user_dep), s: Session = Depends(session)):
         return {"reports": [contributions.report_out(s, r)
                             for r in contributions.open_reports(s, user)],
-                "moderates": bool(access.moderated_domain_ids(s, user))}
+                "recent": [contributions.report_out(s, r)
+                           for r in contributions.recent_decisions(s, user)],
+                "moderates": contributions.handles_reports(s, user)}
+
+    @app.get("/api/reports/{report_id}/review")
+    def review_report(report_id: str, user: User = Depends(user_dep),
+                      s: Session = Depends(session)):
+        """The reported document, read-only, while the report is open: for a
+        personal document, an admin's only way to see it (design §4)."""
+        rep = guard(contributions.report_for, s, user, report_id)
+        return guard(contributions.review, s, actor_for(user), rep)
 
     @app.post("/api/reports/{report_id}/resolve")
     def resolve_report(report_id: str, body: ResolveIn, user: User = Depends(user_dep),
                        s: Session = Depends(session)):
-        rep = s.get(Report, report_id)
-        if rep is None or rep.domain_id not in access.moderated_domain_ids(s, user):
-            raise HTTPException(404, "report not found")
+        rep = guard(contributions.report_for, s, user, report_id)
         guard(contributions.resolve_report, s, actor_for(user), rep, body.action, body.note)
+        return contributions.report_out(s, rep)
+
+    @app.post("/api/reports/{report_id}/undo")
+    def undo_report(report_id: str, user: User = Depends(user_dep),
+                    s: Session = Depends(session)):
+        rep = guard(contributions.report_for, s, user, report_id)
+        guard(contributions.undo_report, s, actor_for(user), rep)
         return contributions.report_out(s, rep)
 
     @app.get("/api/drafts")
@@ -891,7 +919,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         return {"drafts": contributions.draft_count(s, user),
                 "proposals": len(proposals.to_decide(s, user)),
                 "reports": len(contributions.open_reports(s, user)),
-                "moderates": bool(access.moderated_domain_ids(s, user))}
+                "moderates": contributions.handles_reports(s, user)}
 
     @app.get("/api/s/{token}")
     def open_share(token: str, s: Session = Depends(session)):

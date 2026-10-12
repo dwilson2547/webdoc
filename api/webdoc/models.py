@@ -87,6 +87,10 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     """Platform admin (design §4); set from the authentik admin group at sign-in."""
+    is_editor: Mapped[bool] = mapped_column(Boolean, default=False)
+    """May create and write (design §4); set from the authentik editor group at
+    sign-in. Everyone else is a viewer: they read, search and report, and every
+    role they hold is capped at reader. Admins are editors too."""
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     identities: Mapped[list["UserIdentity"]] = relationship(
@@ -524,6 +528,8 @@ class Report(Base):
     reason: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(16), default="open", index=True)
     """open | dismissed | actioned"""
+    revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    """The document's revision when reported: what an admin reviews."""
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     decided_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

@@ -77,9 +77,16 @@ export function Home({ me }: { me: Me | null }) {
     <div className="page">
       <Section title="Public" hint="open to everyone" domains={data.public} empty="No public domains yet."
         action={me?.is_admin && <button onClick={() => setCreating("public")}>New public domain</button>} />
-      {me && (
+      {me && me.is_editor && (
         <Section title="Personal" hint="your own taxonomy" domains={data.personal}
           empty="No domains yet." action={<button onClick={() => setCreating("personal")}>New domain</button>} />
+      )}
+      {me && !me.is_editor && data.personal.length > 0 && (
+        <Section title="Personal" hint="read-only while you're a viewer" domains={data.personal} empty="" />
+      )}
+      {me && !me.is_editor && (
+        <p className="banner info">You're signed in as a viewer: you can read and search everything shared with you and
+          the public domains, and report problems. An admin can make you an editor so you can write.</p>
       )}
       {me && data.shared.length > 0 && <Section title="Shared with you" domains={data.shared} empty="" />}
       {!me && <p className="muted">Sign in to keep your own notes and documents.</p>}

@@ -84,6 +84,18 @@ signed-out visitors can read public domains (below). Four roles:
   rule in §5 binds agents of admins and moderators too: they can propose, not approve.
 - One role per user per scope; the effective permission on a document is the strongest grant that
   covers its domain.
+- **Viewers and editors** ✅ 0.6.0: every account is a *viewer* unless it is in the authentik
+  group `EDITOR_GROUP` (default `webdoc-editors`) or is an admin. Viewers read, search and report;
+  they create nothing, have no personal domain, and in contribution domains only read and report.
+  The platform role is a ceiling: a viewer's role on any domain is at most reader, so demoting
+  someone freezes their own domains read-only (still exportable) and promoting them gives them a
+  "Notes" domain. Unset `EDITOR_GROUP` makes everyone an editor. Synced at every sign-in.
+- **Reports and admin review** ✅ 0.6.0: anyone who can read a published document may report it
+  (not its owner or author). Public-domain reports go to that domain's moderators and admins;
+  personal-domain reports go to admins only. An admin still has no access to personal domains
+  (above) except `GET /api/reports/{id}/review`: that one document, current and as reported,
+  while the report is open, recorded in the owner's activity once per admin and report. Hiding
+  leaves it visible to the owner (with the reason); recent decisions can be undone.
 - **How admins are set** ✅: membership of an authentik group (`ADMIN_GROUP`, chart value
   `oidc.adminGroup`, default `webdoc-admins`), read from the ID token's `groups` claim at every
   sign-in, so removing someone from the group demotes them at their next sign-in. Verified 2026-10-11: the
@@ -361,8 +373,3 @@ can be extracted later once both copies have settled):
 - Should a public contribution keep a link back to a private source document, visible only to the
   author?
 - Does an org domain inherit templates from the org, or only from itself?
-- Default role for new users: the user wants everyone to start as a **viewer** (browse only, no
-  create) with editors able to add; today any signed-in user gets a personal domain and full
-  control of it. To refine.
-- Reports: anyone can report a document; an admin can open a reported document for review, even in
-  a personal domain, and nothing else there. Not designed in detail yet.

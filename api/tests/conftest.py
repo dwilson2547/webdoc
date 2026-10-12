@@ -56,7 +56,7 @@ def database_url(tmp_path):
 def settings(database_url):
     return Settings(database_url=database_url, public_url="http://testserver",
                     oidc_issuer="https://auth.example/app/", oidc_client_id="wd",
-                    oidc_client_secret="s", admin_group="webdoc-admins",
+                    oidc_client_secret="s", admin_group="webdoc-admins", editor_group="webdoc-editors",
                     max_document_bytes=20_000, dev_login=True, embedder="hash",
                     background_index=False)
 
@@ -68,11 +68,12 @@ def app_and_provider(settings):
 
 
 def sign_in(app, provider, sub: str, groups: list[str] | None = None) -> TestClient:
+    """Signs in through the fake authentik; an editor unless `groups` says otherwise."""
     client = TestClient(app)
     r = client.get("/api/auth/oidc/login", follow_redirects=False)
     assert r.status_code == 302
     state = r.headers["location"].split("state=")[1].split("&")[0]
-    provider.subjects["code-" + sub] = (sub, groups or [])
+    provider.subjects["code-" + sub] = (sub, ["webdoc-editors"] if groups is None else groups)
     r = client.get(f"/api/auth/oidc/callback?code=code-{sub}&state={state}",
                    follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"] == "/"

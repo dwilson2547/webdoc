@@ -230,7 +230,7 @@ def can_manage(s: Session, user: User | None, owner_key: str, d: Domain | None) 
     """Who may create or change templates for an owner (and optionally one of
     its domains): the user for their own, admins for public ones, and a public
     domain's moderators for that domain's."""
-    if user is None:
+    if not access.is_editor(user):
         return False
     if owner_key == f"user:{user.id}":
         return d is None or d.owner_key == owner_key
