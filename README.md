@@ -10,11 +10,12 @@ agents over an OAuth MCP server, so web chats and local agents read and write th
 owner keeps a closed taxonomy of domains that agents can use but not change; documents carry
 attributed revision history with diffs, named versions and a trash.
 
-Status: **0.1.0 live** at https://webdoc.danwils.com (phase 1). Domains (personal and public), projects, tags,
-reader/editor/moderator grants with admins from an authentik group, signed-out reading of public
-domains, notes and documents with a Toast UI markdown editor, section-level edits for agents,
-history (who and through which app, diffs, named versions, restore), trash and purge, markdown
-export, and the MCP server. Templates, search and the activity feed are next.
+Status: **0.2.0 live** at https://webdoc.danwils.com (phases 1-2). Domains (personal and public),
+projects, tags, reader/editor/moderator grants with admins from an authentik group, signed-out
+reading of public domains, notes and documents with a Toast UI markdown editor, section-level
+edits for agents, history (who and through which app, diffs, named versions, restore), trash,
+markdown export, document types with per-section guidance, and a proposal queue through which
+agents ask for new domains and types. Search and the activity feed are next.
 Design and roadmap: [`docs/design.md`](docs/design.md).
 
 ## Connect an agent
@@ -30,7 +31,8 @@ do that use a personal access token from **Agents**, sent as `Authorization: Bea
 - `api/` — FastAPI (`webdoc/`), SQLAlchemy + Alembic on Postgres (SQLite locally).
   `access.py` every permission decision, `domains.py` domains/projects/grants, `documents.py`
   documents and their history, `sections.py` markdown section edits, `activity.py` the event log,
-  `export.py` markdown export, `mcp_server.py` the MCP tools. Sign-in (`oidc.py`, `auth.py`), MCP
+  `export.py` markdown export, `templates.py` document types, `proposals.py` the proposal
+  queue, `mcp_server.py` the MCP tools. Sign-in (`oidc.py`, `auth.py`), MCP
   OAuth (`oauth.py`) and tokens (`tokens.py`) are copied from nodewright.
 - `ui/` — Vite + React 19, Toast UI Editor (`src/markdown.tsx`). Built into the image and served by the API.
 - `helm/webdoc/` — chart for Argo.

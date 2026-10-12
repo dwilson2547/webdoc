@@ -70,7 +70,7 @@ h1 { margin: 4px 0; font-size: 26px; }
 .doc-title { font-weight: 600; }
 .doc-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 13px; margin: 2px 0 12px; }
 
-.doc-page.with-history { display: grid; grid-template-columns: 1fr 420px; gap: 20px; max-width: 1600px; }
+.doc-page.with-side { display: grid; grid-template-columns: 1fr 420px; gap: 20px; max-width: 1600px; }
 .doc-main { min-width: 0; }
 .md-view { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px 20px; }
 .md-view .toastui-editor-contents { font-size: 15px; }
@@ -108,6 +108,29 @@ table.grid td, table.grid th, table.tokens td, table.tokens th { text-align: lef
 
 @media (max-width: 760px) {
   .domain-body { grid-template-columns: 1fr; }
-  .doc-page.with-history { grid-template-columns: 1fr; }
+  .doc-page.with-side { grid-template-columns: 1fr; }
   .history { position: static; max-height: none; }
 }
+
+.guidance { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; align-self: start; position: sticky; top: 60px; max-height: calc(100vh - 80px); overflow: auto; font-size: 13px; }
+.guidance h3 { margin: 0 0 4px; }
+.guidance ol { list-style: none; padding: 0; margin: 8px 0 0; }
+.guidance li { margin-bottom: 10px; }
+.guidance li.missing strong { color: var(--danger); }
+.fields-edit { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; }
+.fields-edit label { display: flex; align-items: center; gap: 6px; }
+.fields-edit label span { min-width: 90px; font-size: 13px; color: var(--muted); }
+.fields-edit input { flex: 1; }
+input.invalid { border-color: var(--danger); }
+.fields-view { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 0 0 10px; font-size: 13px; }
+.fields-view div { display: flex; gap: 6px; }
+.fields-view dt { color: var(--muted); }
+.fields-view dd { margin: 0; }
+.check-note { font-size: 13px; margin: 0 0 8px; }
+.badge-count { background: var(--accent); color: #fff; border-radius: 10px; padding: 0 7px; font-size: 12px; margin-left: 4px; }
+.proposal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin: 10px 0; }
+.proposal pre { background: var(--bg); border-radius: 6px; padding: 8px; overflow: auto; max-height: 260px; white-space: pre-wrap; }
+.proposal .status { text-transform: capitalize; }
+.tpl-list li { padding: 8px 0; border-bottom: 1px solid var(--border); list-style: none; }
+.tpl-list { padding: 0; }
+.field-rows .row { margin-bottom: 4px; }

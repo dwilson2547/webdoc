@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0 — 2026-10-11
+
+Phase 2 (design §14): document types and the proposal queue.
+
+- Document types: markdown skeletons whose headings are the sections, with guidance in HTML comments
+  and "(optional)" for sections that may be left out, plus fields and default tags. Built-ins:
+  Architecture, Decision record, Issue resolution. A domain's own type wins over its owner's, which
+  wins over the built-in. Types page to create, customize and version them.
+- Typed documents: pick a type when creating, start from its headings with the guidance alongside,
+  fill its fields; required sections and fields are checked at creation and shown if missing later.
+  Fields are editable and restored with versions.
+- Proposals: agents can propose a domain, a change to a domain, or a document type; nothing
+  changes until a person approves on the Proposals page (count in the header), optionally editing
+  a new domain first. Rejections carry a note the agent can read.
+- MCP: list_templates, get_template, typed create_document, update_document fields,
+  propose_domain, propose_domain_change, propose_template, list_proposals.
+
+### Changed
+- Admins no longer have any access to other people's personal domains; their control covers
+  public domains.
+
 ## 0.1.0 — 2026-10-11
 
 Phase 1 (design §14). Live at https://webdoc.danwils.com (Argo app in infra/cluster-config).

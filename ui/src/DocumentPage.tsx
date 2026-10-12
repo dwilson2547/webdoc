@@ -3,6 +3,7 @@ import { api, ApiError, errText, type Doc, type DomainDetail } from "./api";
 import { HistoryPanel } from "./HistoryPanel";
 import { MarkdownEditor, MarkdownView, type EditorHandle } from "./markdown";
 import { Link, navigate } from "./router";
+import { FieldsEditor, FieldsView, GuidancePanel } from "./TemplateParts";
 import { ago, parseTags } from "./util";
 
 function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => void; onCancel: () => void }) {
@@ -10,6 +11,7 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
   const [title, setTitle] = useState(doc.title);
   const [tags, setTags] = useState(doc.tags.join(", "));
   const [project, setProject] = useState(doc.project_id ?? "");
+  const [fields, setFields] = useState<Record<string, string>>(doc.fields);
   const [domain, setDomain] = useState<DomainDetail | null>(null);
   const [conflict, setConflict] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -23,6 +25,9 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
       onSaved(await api.saveDocument(doc.id, {
         base_revision: base, title: title.trim(), body: editor.current!.getMarkdown(),
         tags: parseTags(tags), project_id: project || null,
+        // Emptied fields are sent as null, which removes them.
+        fields: Object.fromEntries([...new Set([...Object.keys(doc.fields), ...Object.keys(fields)])]
+          .map((k) => [k, fields[k]?.trim() ? fields[k].trim() : null])),
       }));
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) setConflict(e.body?.detail?.current ?? null);
@@ -44,6 +49,10 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
         </label>
         <label className="grow">Tags <input value={tags} placeholder="comma, separated" onChange={(e) => setTags(e.target.value)} /></label>
       </div>
+      {(doc.template || Object.keys(doc.fields).length > 0) && (
+        <FieldsEditor defs={doc.template?.fields ?? []} values={fields} onChange={setFields}
+          missing={doc.template?.check.missing_fields} />
+      )}
       <MarkdownEditor ref={editor} initial={doc.body} />
       {conflict !== null && (
         <div className="banner warn">
@@ -80,7 +89,7 @@ export function DocumentPage({ id }: { id: string }) {
   const untrash = async () => setDoc(await api.untrash(doc.id));
 
   return (
-    <div className={"page doc-page" + (history ? " with-history" : "")}>
+    <div className={"page doc-page" + (history || (editing && doc.template) ? " with-side" : "")}>
       <div className="doc-main">
         <div className="crumbs">
           <Link to="/">Home</Link> › <Link to={`/domain/${doc.domain_id}`}>{doc.domain}</Link>
@@ -105,15 +114,24 @@ export function DocumentPage({ id }: { id: string }) {
               {doc.can_delete && !doc.deleted_at && <button onClick={() => void trash()}>Delete</button>}
             </div>
             <div className="doc-meta muted">
-              <span className={"kind k-" + doc.kind}>{doc.kind}</span>
+              <span className={"kind k-" + doc.kind}>{doc.template ? doc.template.name : doc.type ?? doc.kind}</span>
               {doc.tags.map((t) => <span key={t} className="tag small">{t}</span>)}
               <span>revision {doc.revision} · updated {ago(doc.updated_at)}</span>
             </div>
+            <FieldsView fields={doc.fields} />
+            {doc.template && (doc.template.check.missing_sections.length > 0 || doc.template.check.missing_fields.length > 0) && (
+              <p className="muted check-note">
+                Not a complete {doc.template.name}:{" "}
+                {[...doc.template.check.missing_sections.map((x) => `section “${x}”`),
+                  ...doc.template.check.missing_fields.map((x) => `field “${x}”`)].join(", ")} missing.
+              </p>
+            )}
             <MarkdownView markdown={doc.body} />
           </>
         )}
       </div>
       {history && <HistoryPanel doc={doc} onClose={() => setHistory(false)} onRestored={(d) => setDoc(d)} />}
+      {!history && editing && doc.template && <GuidancePanel spec={doc.template} check={doc.template.check} />}
     </div>
   );
 }

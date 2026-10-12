@@ -46,12 +46,27 @@ export type DomainDetail = Domain & { projects: Project[]; can: string[]; assign
 export type Home = { public: Domain[]; personal: Domain[]; shared: Domain[] };
 export type Kind = "note" | "document";
 export type DocMeta = {
-  id: string; kind: Kind; title: string; domain_id: string; domain: string; project_id: string | null;
+  id: string; kind: Kind; title: string; type: string | null; fields: Record<string, string>; domain_id: string; domain: string; project_id: string | null;
   project: string | null; tags: string[]; revision: number; created_at: string; updated_at: string;
   deleted_at: string | null;
 };
+export type FieldDef = { name: string; description: string; required: boolean };
+export type TemplateSection = { path: string[]; required: boolean; guidance: string };
+export type TemplateSpec = {
+  id: string | null; type: string; name: string; description: string; source: "built-in" | "personal" | "public" | "domain";
+  version: number; fields: FieldDef[]; default_tags: string[]; sections: TemplateSection[];
+  skeleton?: string; starter?: string; domain_id?: string | null; domain?: string | null; updated_at?: string;
+};
+export type TemplateCheck = { missing_sections: string[]; missing_fields: string[] };
 export type Doc = DocMeta & {
   body: string; role: Role | null; can_edit: boolean; can_delete: boolean; can_purge: boolean; domain_scope: Scope;
+  template?: (TemplateSpec & { check: TemplateCheck }) | null;
+};
+export type Proposal = {
+  id: string; kind: "domain.create" | "domain.update" | "template.create" | "template.update";
+  status: "pending" | "approved" | "rejected" | "withdrawn"; payload: any; rationale: string; scope: Scope;
+  domain_id: string | null; domain: string | null; by: string | null; client: string; created_at: string;
+  decided_by: string | null; decided_at: string | null; decision_note: string; result_id: string | null; can_decide: boolean;
 };
 export type Revision = {
   revision: number; created_at: string; by: string | null; client: string; source: string; summary: string;
@@ -87,10 +102,10 @@ export const api = {
   deleteProject: (id: string) => call("DELETE", `/api/projects/${id}`),
   documents: (f: { domain?: string; project?: string; kind?: string; tag?: string; q?: string; trashed?: boolean; limit?: number; offset?: number }) =>
     call<{ total: number; documents: DocMeta[] }>("GET", "/api/documents" + qs(f)),
-  createDocument: (body: { domain_id: string; kind: Kind; title: string; body: string; tags: string[]; project_id: string | null }) =>
+  createDocument: (body: { domain_id: string; kind: Kind; title: string; body: string; tags: string[]; project_id: string | null; type?: string | null; fields?: Record<string, string> }) =>
     call<Doc>("POST", "/api/documents", body),
   document: (id: string) => call<Doc>("GET", `/api/documents/${id}`),
-  saveDocument: (id: string, body: { base_revision: number; title?: string; body?: string; tags?: string[]; project_id?: string | null; domain_id?: string }) =>
+  saveDocument: (id: string, body: { base_revision: number; title?: string; body?: string; tags?: string[]; fields?: Record<string, string | null>; project_id?: string | null; domain_id?: string }) =>
     call<Doc>("PUT", `/api/documents/${id}`, body),
   trash: (id: string) => call("DELETE", `/api/documents/${id}`),
   untrash: (id: string) => call<Doc>("POST", `/api/documents/${id}/restore`),
@@ -102,6 +117,21 @@ export const api = {
   restoreRevision: (id: string, n: number) => call<Doc>("POST", `/api/documents/${id}/revisions/${n}/restore`),
   diff: (id: string, a: number, b?: number) => call<{ diff: string }>("GET", `/api/documents/${id}/diff` + qs({ a, b })).then((r) => r.diff),
   tags: (domain?: string) => call<{ tags: { tag: string; count: number }[] }>("GET", "/api/tags" + qs({ domain })).then((r) => r.tags),
+  domainTemplates: (domainId: string) =>
+    call<{ templates: TemplateSpec[] }>("GET", `/api/domains/${domainId}/templates`).then((r) => r.templates),
+  templates: () => call<{ templates: TemplateSpec[]; builtin: TemplateSpec[] }>("GET", "/api/templates"),
+  createTemplate: (body: { scope: Scope; domain_id?: string | null; type: string; name: string; description: string; skeleton: string; fields: FieldDef[]; default_tags: string[] }) =>
+    call<TemplateSpec>("POST", "/api/templates", body),
+  patchTemplate: (id: string, body: { name?: string; description?: string; skeleton?: string; fields?: FieldDef[]; default_tags?: string[] }) =>
+    call<TemplateSpec>("PATCH", `/api/templates/${id}`, body),
+  deleteTemplate: (id: string) => call("DELETE", `/api/templates/${id}`),
+  templateHistory: (id: string) =>
+    call<{ revisions: { version: number; name: string; skeleton: string; by: string | null; created_at: string }[] }>("GET", `/api/templates/${id}/revisions`).then((r) => r.revisions),
+  proposals: () => call<{ to_decide: Proposal[]; mine: Proposal[] }>("GET", "/api/proposals"),
+  proposalCount: () => call<{ pending: number }>("GET", "/api/proposals/count").then((r) => r.pending),
+  approve: (id: string, edits?: Record<string, unknown>) => call<Proposal>("POST", `/api/proposals/${id}/approve`, { edits }),
+  reject: (id: string, note: string) => call<Proposal>("POST", `/api/proposals/${id}/reject`, { note }),
+  withdraw: (id: string) => call<Proposal>("POST", `/api/proposals/${id}/withdraw`),
   tokens: () => call<Token[]>("GET", "/api/tokens"),
   createToken: (name: string) => call<NewToken>("POST", "/api/tokens", { name }),
   revokeToken: (id: string) => call("DELETE", `/api/tokens/${id}`),

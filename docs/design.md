@@ -90,16 +90,16 @@ signed-out visitors can read public domains (below). Four roles:
   webdoc provider uses authentik's managed profile scope mapping, whose expression returns
   `groups` (the user's group names); group `webdoc-admins` comes from the blueprint
   (`infra/cluster-config/authentik/blueprints/webdoc.yaml`), membership by hand.
-- **Admins and personal domains** ✅: admins can open any domain by id (their "full control"), but
-  other people's personal domains are never listed for them, so neither their home page nor their
-  agents' `list_domains` fills up with everyone's private notes.
+- **Admins and personal domains** ✅ (0.2.0): admins have no access to anyone's personal domains;
+  their control covers public domains (and orgs, later). Reviewing a reported personal document is a
+  separate flow, not built yet (§15).
 - **Permissions as built** ✅: actions are read / write / delete (trash and restore) / purge /
   manage (rename, describe, delete the domain) / grants. Owner and admin: all. Moderator: read,
   write, delete, grants (reader and editor only). Editor: read, write, delete. Reader: read.
   Only an empty domain (trash included) can be deleted, so deleting one never takes documents
   with it.
 
-## 5. Domain governance 📐
+## 5. Domain governance ✅ (0.2.0, `proposals.py`)
 
 The rule — domains change only with explicit user permission — is enforced by the tool surface, not
 by instructions:
@@ -112,12 +112,28 @@ by instructions:
 - A write naming an unknown domain fails with the list of valid domains and a hint to propose one.
 - Templates follow the same pattern: agents may `propose_template`; only the owner publishes.
 - Projects and tags are open to agents (they are the low-stakes axes).
+- As built ✅: proposals need a rationale, are capped at 25 pending per user, and appear on a
+  Proposals page (with a count in the header) for whoever may decide: the owner for personal
+  domains and templates, admins for public ones, and a public domain's moderators for that domain's
+  templates. The approver may edit a new domain's name, slug or description before approving;
+  approving applies the change as the approver. Rejections carry an optional note the agent reads
+  with `list_proposals`; the proposer can withdraw a pending one. A template change proposal keeps
+  the description, fields and default tags it doesn't mention.
 
-## 6. Templates (document types) 📐
+## 6. Templates (document types) ✅ (0.2.0, `templates.py`; public-domain contribution types 📐 phase 5)
 
 A template has: `type` (e.g. `architecture`), a markdown skeleton, **guidance** per section (shown to
 agents and in the editor's side panel, never stored in the document), required frontmatter fields,
-default domain/tags, and a version.
+default tags, and a version.
+
+- Skeleton format ✅: each heading is a section; an HTML comment under a heading is that section's
+  guidance; a heading ending in "(optional)" may be left out, every other one is required. A new
+  document starts from the skeleton with comments and markers stripped.
+- Built-in types ✅: `architecture`, `decision`, `issue-resolution` (sections from the
+  `issue-documentation` skill's template). A user's own template of the same type replaces the
+  built-in in their domains; the Types page "Customize" starts from the built-in.
+- After creation, a typed document may drift from its template; `get_document` (`template_check`)
+  and the document page show what is missing rather than blocking edits.
 
 - `get_template(type)` returns skeleton + guidance + required fields.
 - `create_document(type=…)` validates required sections and fields; it rejects with the missing
@@ -205,13 +221,16 @@ history; moderators and admins see it.
   injected at session start.
 - Web UI: a feed per user and per domain.
 
-## 10. MCP tools (v1) 📐
+## 10. MCP tools (v1) ✅ except search, find, backlinks, whats_new, locks and contributions
 
 Built in 0.1.0 ✅: `list_domains` (with projects), `create_project`, `get_writing_guide`,
 `list_documents`, `get_document`, `create_document`, `create_note`, `edit_document`,
 `update_document` (title, tags, project, domain move, or whole body with `base_revision`; replaces
 the planned `set_tags`), `delete_document`, `restore_document`, `list_versions`, `diff_versions`,
 `save_version`, `restore_version` (`get_document` takes `revision`, replacing `get_version`).
+Built in 0.2.0 ✅: `list_templates`, `get_template`, typed `create_document` (`type`, `fields`),
+`update_document` `fields`, `propose_domain`, `propose_domain_change`, `propose_template`,
+`list_proposals`.
 
 | Area | Tools (full plan) |
 |---|---|
@@ -283,7 +302,7 @@ can be extracted later once both copies have settled):
 1. ✅ 0.1.0 **Core**: scaffold (copy nodewright auth/OAuth/tokens), roles model with admin + per-domain
    reader/editor grants, domains (UI-only creation), projects, tags, notes + documents, document
    history (§9.1: attributed revisions, named versions, diffs, trash), Toast UI editor, home page (personal section first), markdown export. MCP read/write tools.
-2. **Templates + governance**: template CRUD in UI, `get_template`/typed `create_document`
+2. ✅ 0.2.0 **Templates + governance**: template CRUD in UI, `get_template`/typed `create_document`
    validation, `propose_*` tools and the approval queue.
 3. **Search + activity**: chunking, fastembed, hybrid `search`, literal `find`, central search UI
    with filters, events, `whats_new`, feed UI.
@@ -298,3 +317,8 @@ can be extracted later once both copies have settled):
 - Should a public contribution keep a link back to a private source document, visible only to the
   author?
 - Does an org domain inherit templates from the org, or only from itself?
+- Default role for new users: the user wants everyone to start as a **viewer** (browse only, no
+  create) with editors able to add; today any signed-in user gets a personal domain and full
+  control of it. To refine.
+- Reports: anyone can report a document; an admin can open a reported document for review, even in
+  a personal domain, and nothing else there. Not designed in detail yet.
