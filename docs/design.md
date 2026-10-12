@@ -86,8 +86,10 @@ signed-out visitors can read public domains (below). Four roles:
   covers its domain.
 - **How admins are set** ✅: membership of an authentik group (`ADMIN_GROUP`, chart value
   `oidc.adminGroup`, default `webdoc-admins`), read from the ID token's `groups` claim at every
-  sign-in, so removing someone from the group demotes them at their next sign-in. ⚠ unverified:
-  that authentik's webdoc provider puts `groups` in the ID token; check when the provider is created.
+  sign-in, so removing someone from the group demotes them at their next sign-in. Verified 2026-10-11: the
+  webdoc provider uses authentik's managed profile scope mapping, whose expression returns
+  `groups` (the user's group names); group `webdoc-admins` comes from the blueprint
+  (`infra/cluster-config/authentik/blueprints/webdoc.yaml`), membership by hand.
 - **Admins and personal domains** ✅: admins can open any domain by id (their "full control"), but
   other people's personal domains are never listed for them, so neither their home page nor their
   agents' `list_domains` fills up with everyone's private notes.
@@ -154,8 +156,7 @@ concurrent human work.
   to a background worker if not.
 - Chunking by markdown heading; re-embed only chunks whose text changed.
 - **Hybrid**: pgvector cosine + Postgres full-text (`tsvector`), merged by reciprocal rank fusion.
-  ⚠ unverified: pgvector is available on the Postgres instance webdoc will use (dan-wiki uses
-  pgvector, so some instance has it). SQLite dev mode does brute-force cosine in Python.
+  pgvector ✅ is installed in webdoc's database (§13). SQLite dev mode does brute-force cosine in Python.
 - **`find`: strict literal lookup** alongside semantic `search` — whole-word or exact-phrase match
   over document text (Postgres `~*` with word boundaries over the stored markdown, or `LIKE` for
   phrases), no embeddings involved, so it finds every occurrence of an identifier, error string or
@@ -272,6 +273,9 @@ can be extracted later once both copies have settled):
   Toast UI's package hides its own types from bundler resolution, hence `ui/src/toastui.d.ts`.
 - `helm/webdoc/` — chart deployed by Argo; served at `webdoc.danwils.com` behind authentik, like
   nodewright.
+- Database ✅: `webdoc` on the cluster's pgvector postgres (`postgres-pgvector`, pg16), created by
+  `infra/cluster-config/postgres/init-webdoc.sql` with the `vector` extension (0.8.2) already
+  installed for §8; the schema is the app's Alembic migrations.
 - Embedding model weights are baked into the image so pods don't download them at start.
 
 ## 14. Phases 📐
