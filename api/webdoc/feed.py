@@ -54,6 +54,22 @@ def _names(s: Session, evs: list[Event]) -> tuple[dict, dict]:
     return docs, doms
 
 
+def _seen(s: Session, user: User | None, evs: list[Event], docs: dict) -> list[Event]:
+    """Leave out events about documents the user can't see now: a contribution
+    hidden by a moderator, or a draft that is someone else's."""
+    roles: dict[str, str | None] = {}
+    out = []
+    for e in evs:
+        doc = docs.get(e.target_id) if e.target_kind == "document" else None
+        if doc is not None and doc.status != "published":
+            if doc.domain_id not in roles:
+                roles[doc.domain_id] = access.role_on(s, user, doc.domain)
+            if not access.can_see(user, doc, roles[doc.domain_id]):
+                continue
+        out.append(e)
+    return out
+
+
 def event_out(e: Event, docs: dict, doms: dict) -> dict:
     doc = docs.get(e.target_id) if e.target_kind == "document" else None
     d = doms.get(e.domain_id)
@@ -68,9 +84,10 @@ def event_out(e: Event, docs: dict, doms: dict) -> dict:
 def feed(s: Session, user: User | None, *, domain_id: str | None = None,
          before: datetime | None = None, limit: int = 50) -> dict:
     evs = events(s, user, domain_id=domain_id, before=before, limit=limit + 1)
+    more = len(evs) > limit
     docs, doms = _names(s, evs[:limit])
-    return {"events": [event_out(e, docs, doms) for e in evs[:limit]],
-            "more": len(evs) > limit}
+    return {"events": [event_out(e, docs, doms) for e in _seen(s, user, evs[:limit], docs)],
+            "more": more}
 
 
 def whats_new(s: Session, user: User, client: str, *, since: datetime | None = None,
@@ -92,7 +109,7 @@ def whats_new(s: Session, user: User, client: str, *, since: datetime | None = N
     evs = list(s.scalars(q.order_by(Event.at.desc()).limit(MAX_EVENTS + 1)))
     docs, doms = _names(s, evs)
     groups: dict[tuple, dict] = {}
-    for e in evs[:MAX_EVENTS]:
+    for e in _seen(s, user, evs[:MAX_EVENTS], docs):
         g = groups.get((e.target_kind, e.target_id))
         if g is None:
             o = event_out(e, docs, doms)

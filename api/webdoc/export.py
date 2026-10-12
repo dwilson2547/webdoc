@@ -37,7 +37,8 @@ def markdown(doc: Document) -> str:
 
 def domain_zip(s: Session, d: Domain) -> bytes:
     docs = s.scalars(select(Document).where(Document.domain_id == d.id,
-                                            Document.deleted_at.is_(None))
+                                            Document.deleted_at.is_(None),
+                                            Document.status == "published")
                      .order_by(Document.title)).all()
     buf = io.BytesIO()
     used: set[str] = set()

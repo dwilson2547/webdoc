@@ -8,7 +8,7 @@ domains and nothing else.
 from __future__ import annotations
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select
+from sqlalchemy import and_, false, or_, select
 from sqlalchemy.orm import Session
 
 from .models import Document, Domain, DomainGrant, Project, User
@@ -19,11 +19,12 @@ DELETE = "delete"                # move to trash, restore from trash
 PURGE = "purge"                  # delete permanently
 MANAGE = "manage"                # rename, describe or delete the domain itself
 GRANTS = "grants"                # give other people roles on the domain
+MODERATE = "moderate"            # hide, lock, mark duplicates, handle reports, contribution settings
 
 ROLES: dict[str, frozenset[str]] = {
-    "admin": frozenset({READ, WRITE, DELETE, PURGE, MANAGE, GRANTS}),
-    "owner": frozenset({READ, WRITE, DELETE, PURGE, MANAGE, GRANTS}),
-    "moderator": frozenset({READ, WRITE, DELETE, GRANTS}),
+    "admin": frozenset({READ, WRITE, DELETE, PURGE, MANAGE, GRANTS, MODERATE}),
+    "owner": frozenset({READ, WRITE, DELETE, PURGE, MANAGE, GRANTS, MODERATE}),
+    "moderator": frozenset({READ, WRITE, DELETE, GRANTS, MODERATE}),
     "editor": frozenset({READ, WRITE, DELETE}),
     "reader": frozenset({READ}),
 }
@@ -93,6 +94,34 @@ def project(s: Session, user: User | None, project_id: str, action: str = READ) 
     return p
 
 
+def can_see(user: User | None, doc: Document, role: str | None) -> bool:
+    """Drafts are their author's alone; hidden documents are seen by their
+    author and the domain's moderators (design §12)."""
+    if role is None:
+        return False
+    if doc.status == "published":
+        return True
+    if user is not None and doc.created_by == user.id:
+        return True
+    return doc.status == "hidden" and MODERATE in ROLES[role]
+
+
+def doc_allows(user: User | None, doc: Document, role: str | None, action: str) -> bool:
+    """The domain role, plus a contribution's author editing and trashing
+    their own (they need no role on a public domain); a moderator's lock
+    stops everyone but moderators."""
+    if role is None:
+        return False
+    ok = action in ROLES[role]
+    if not ok and doc.kind == "contribution" and user is not None \
+            and doc.created_by == user.id and action in (WRITE, DELETE):
+        ok = True
+    if ok and action == WRITE and (doc.locked or doc.merged_into_id) \
+            and MODERATE not in ROLES[role]:
+        return False
+    return ok
+
+
 def document(s: Session, user: User | None, doc_id: str, action: str = READ,
              trashed: bool = False) -> Document:
     """A document the user may act on. Trashed documents are only found when
@@ -100,11 +129,36 @@ def document(s: Session, user: User | None, doc_id: str, action: str = READ,
     doc = s.get(Document, doc_id)
     if doc is None or (doc.deleted_at is not None and not trashed):
         raise Denied("document not found")
-    try:
-        domain(s, user, doc.domain_id, action)
-    except Denied as exc:
-        raise Denied("document not found" if exc.status == 404 else str(exc), exc.status) from None
+    d = doc.domain
+    role = role_on(s, user, d)
+    if not can_see(user, doc, role):
+        raise Denied("document not found")
+    if not doc_allows(user, doc, role, action):
+        why = ("a moderator locked this contribution" if doc.locked or doc.merged_into_id
+               else "you can't do that in this domain")
+        raise Denied(why, 403)
     return doc
+
+
+def moderated_domain_ids(s: Session, user: User | None) -> list[str]:
+    if user is None:
+        return []
+    q = select(Domain.id).where(Domain.id.in_(
+        select(DomainGrant.domain_id).where(DomainGrant.user_id == user.id,
+                                            DomainGrant.role == "moderator")))
+    if user.is_admin:
+        q = select(Domain.id).where(or_(Domain.scope == "public", Domain.id.in_(q)))
+    return list(s.scalars(q))
+
+
+def visible_documents(s: Session, user: User | None):
+    """SQL condition matching can_see, for lists and search (callers already
+    limit to readable domains)."""
+    if user is None:
+        return Document.status == "published"
+    mod = moderated_domain_ids(s, user)
+    return or_(Document.status == "published", Document.created_by == user.id,
+               and_(Document.status == "hidden", Document.domain_id.in_(mod)) if mod else false())
 
 
 def visible_domains(s: Session, user: User | None) -> list[Domain]:

@@ -230,6 +230,12 @@ class Domain(Base):
     name: Mapped[str] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(Text, default="")
     revision: Mapped[int] = mapped_column(Integer, default=1)
+    accepts_contributions: Mapped[bool] = mapped_column(Boolean, default=False,
+                                                        server_default="0")
+    """Public domains only (design §12): any signed-in user may draft and,
+    after review, publish contributions here."""
+    contribution_types: Mapped[list] = mapped_column(Json, default=list)
+    """Document types a contribution must use; empty means any (or none)."""
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -317,6 +323,17 @@ class Document(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     deleted_by: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="published",
+                                        server_default="published", index=True)
+    """published | draft (contributions until a person publishes them; only
+    the author sees a draft) | hidden (by a moderator)."""
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    locked: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    """Moderator lock on a contribution: no edits, replies or confirmations."""
+    hidden_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
+    merged_into_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """A contribution marked as a duplicate of another; search skips it."""
+    accepted_reply_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     indexed_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     """The revision the search chunks were built from; the indexer picks up
     documents where it differs from `revision` (indexer.py)."""
@@ -444,6 +461,76 @@ class ShareLink(Base):
     last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     creator: Mapped[User | None] = relationship()
+
+
+class Reply(Base):
+    """A reply to a contribution (design §12): another fix, a report that it
+    didn't work, or a comment. Agents draft replies; a person publishes them.
+    Published replies aren't edited, only withdrawn by their author or hidden
+    by a moderator, so a thread reads as it happened."""
+    __tablename__ = "replies"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    author_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    client: Mapped[str] = mapped_column(String(100), default="web")
+    kind: Mapped[str] = mapped_column(String(16))           # solution | didnt-work | comment
+    body: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="draft")
+    """draft | published | withdrawn | hidden"""
+    hidden_reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    author: Mapped[User | None] = relationship()
+
+
+class Confirmation(Base):
+    """"This worked for me" on a contribution or one of its replies: the
+    quality signal instead of votes (design §12). One per person per target."""
+    __tablename__ = "confirmations"
+    __table_args__ = (UniqueConstraint("document_id", "user_id", "target"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    reply_id: Mapped[str | None] = mapped_column(
+        ForeignKey("replies.id", ondelete="CASCADE"), nullable=True)
+    target: Mapped[str] = mapped_column(String(32), default="")
+    """The reply id, or "" for the contribution itself (NULLs aren't unique)."""
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    client: Mapped[str] = mapped_column(String(100), default="web")
+    environment: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    user: Mapped[User] = relationship()
+
+
+class Report(Base):
+    """Someone flagging a contribution or reply for moderators (design §12)."""
+    __tablename__ = "reports"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    domain_id: Mapped[str] = mapped_column(ForeignKey("domains.id", ondelete="CASCADE"),
+                                           index=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    reply_id: Mapped[str | None] = mapped_column(
+        ForeignKey("replies.id", ondelete="CASCADE"), nullable=True)
+    reporter_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    """open | dismissed | actioned"""
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    decided_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    note: Mapped[str] = mapped_column(Text, default="")
+
+    reporter: Mapped[User | None] = relationship(foreign_keys=[reporter_id])
 
 
 class FeedCursor(Base):

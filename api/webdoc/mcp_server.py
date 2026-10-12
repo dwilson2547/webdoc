@@ -22,7 +22,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import (__version__, access, documents, domains, feed, leases, proposals,
+from . import (__version__, access, contributions, documents, domains, feed, leases, proposals,
                search as searching, sections, styleguide, tags as tagmod, templates, tokens)
 from .activity import Actor
 from .config import Settings
@@ -66,6 +66,13 @@ the signed-in user who connected you, with their permissions.
   wait or tell the user rather than retrying in a loop. For a long series of edits to one
   document, lock_document first (the user sees it and can still take over) and
   unlock_document when done.
+- Public contribution domains (list_domains: accepts_contributions) are shared with everyone,
+  like a Q&A site. Before posting, search them (source="public"): if the issue is already
+  there, confirm the fix that worked or reply rather than posting a duplicate.
+  draft_contribution checks for duplicates first and only creates a draft; the user reads
+  and publishes it in the web UI, and replies work the same way. Never put private
+  details in a contribution or reply: no hostnames, IPs, internal paths, project names,
+  usernames or secrets. Generalise them ("a k3s cluster", "the API pod").
 - delete_document moves a document to the trash (restore_document brings it back).
   Don't delete what the user wrote unless asked.
 """
@@ -129,7 +136,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                                 "in a loop.") from None
             except (documents.DocError, domains.DomainError, sections.SectionError,
                     tagmod.TagError, templates.TemplateError, proposals.ProposalError,
-                    searching.SearchError) as exc:
+                    searching.SearchError, contributions.ContribError) as exc:
                 raise ToolError(str(exc)) from None
 
     def holder(actor: Actor) -> leases.Holder:
@@ -140,6 +147,11 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         """A document this agent may change now: allowed, and nobody else
         holds its edit lease."""
         doc = access.document(s, user, doc_id, action, trashed=trashed)
+        if doc.kind == "contribution" and doc.status != "draft" and action == access.WRITE:
+            # Edits to a published contribution go public at once, past the
+            # human gate; the author makes them in the web UI.
+            raise ToolError("this contribution is published; changes to it are made by a person "
+                            "in the web UI. To add information, reply.")
         leases.check(s, doc.id, holder(actor))
         return doc
 
@@ -351,6 +363,10 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                     o["template_check"] = templates.check(spec, o["body"], o["fields"])
                 except templates.TemplateError:
                     pass
+            if doc.kind == "contribution":
+                o["status"] = doc.status
+                o["contribution"] = contributions.thread(s, user, doc)
+                del o["contribution"]["can"]
             if heading_path:
                 o["section"] = sections.get(o["body"], heading_path)
                 del o["body"]
@@ -479,6 +495,77 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         def go(s, user, actor):
             doc = access.document(s, user, document_id)
             return {"released": leases.release(s, doc.id, holder(actor))}
+        return run(ctx, go)
+
+    @server.tool()
+    def draft_contribution(ctx: Context, domain: str,
+                           title: Annotated[str, Field(min_length=1, max_length=300)],
+                           body: str = "", type: str | None = None,
+                           fields: dict[str, str] | None = None, tags: list[str] | None = None,
+                           checked_duplicates: bool = False) -> dict:
+        """Draft a contribution to a public contribution domain. Only a draft: the user
+        reads it and publishes it in the web UI. The first call looks for existing
+        contributions on the same thing and, if it finds any, returns them without
+        creating anything: confirm or reply to the one that matches. If none does, call
+        again with checked_duplicates=true. If the domain takes typed contributions,
+        pass type (get_template shows its sections) and its fields."""
+        def go(s, user, actor):
+            d = find_domain(s, user, domain)
+            if not contributions.can_contribute(user, d):
+                raise ToolError(f"{d.name} doesn't take contributions")
+            if not checked_duplicates:
+                emb = indexer.semantic if indexer is not None else None
+                dups = contributions.possible_duplicates(s, emb, d, title, body)
+                if dups:
+                    for x in dups:
+                        x["url"] = url(x["id"])
+                    return {"created": False, "possible_duplicates": dups,
+                            "next": "if one of these is the same issue, confirm or reply to it; "
+                                    "otherwise call again with checked_duplicates=true"}
+            doc = contributions.draft(s, actor, d, title=title, body=body, type=type,
+                                      fields=fields, tags=tags, max_bytes=limit)
+            return {"created": True, "id": doc.id, "status": "draft", "url": url(doc.id),
+                    "next": "tell the user it's waiting for them to review and publish at "
+                            f"{settings.public_url}/drafts"}
+        return run(ctx, go)
+
+    @server.tool()
+    def reply(ctx: Context, document_id: str,
+              kind: Literal["solution", "didnt-work", "comment"],
+              body: Annotated[str, Field(min_length=1, max_length=20000)]) -> dict:
+        """Draft a reply to a published contribution: solution (another way to fix it),
+        didnt-work (you tried it; say what happened and in what environment), or
+        comment. The user reviews and publishes it in the web UI."""
+        def go(s, user, actor):
+            doc = access.document(s, user, document_id)
+            r = contributions.add_reply(s, actor, doc, kind, body)
+            return {"id": r.id, "status": "draft",
+                    "next": "tell the user it's waiting for them to review and publish at "
+                            f"{settings.public_url}/drafts"}
+        return run(ctx, go)
+
+    @server.tool()
+    def confirm(ctx: Context, document_id: str, reply_id: str | None = None,
+                environment: Annotated[str, Field(max_length=300)] = "") -> dict:
+        """Record that a contribution's fix (or one reply's) worked for the user: the
+        quality signal others look for. Only when the user says it worked. environment is
+        optional and generic (OS, versions, hardware), never hosts or paths."""
+        def go(s, user, actor):
+            doc = access.document(s, user, document_id)
+            r = contributions.reply_for(s, user, reply_id)[0] if reply_id else None
+            contributions.confirm(s, actor, doc, r, environment)
+            return {"confirmed": True}
+        return run(ctx, go)
+
+    @server.tool()
+    def list_drafts(ctx: Context) -> dict:
+        """The user's contributions and replies still waiting to be published."""
+        def go(s, user, actor):
+            out = contributions.drafts(s, user)
+            for c in out["contributions"]:
+                c["url"] = url(c["id"])
+            out["review_url"] = f"{settings.public_url}/drafts"
+            return out
         return run(ctx, go)
 
     @server.tool()

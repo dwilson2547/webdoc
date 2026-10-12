@@ -68,9 +68,12 @@ def scope(s: Session, user: User | None, f: Filters) -> dict[str, Domain]:
     return {d.id: d for d in ds if f.source is None or source_of(d, user) == f.source}
 
 
-def _conditions(s: Session, f: Filters) -> list | None:
-    """Conditions on Document; None when a filter can't match anything."""
-    c = [Document.deleted_at.is_(None)]
+def _conditions(s: Session, user: User | None, f: Filters) -> list | None:
+    """Conditions on Document; None when a filter can't match anything.
+    Drafts show only to their author, hidden ones to moderators too, and a
+    contribution marked as a duplicate gives way to the one it duplicates."""
+    c = [Document.deleted_at.is_(None), access.visible_documents(s, user),
+         Document.merged_into_id.is_(None)]
     if f.project_id:
         c.append(Document.project_id == f.project_id)
     if f.kind:
@@ -97,7 +100,7 @@ def _meta(doc: Document, d: Domain, user: User | None) -> dict:
             "domain_id": d.id, "domain": d.name, "source": source_of(d, user),
             "owner": d.owner.username if d.scope != "public" and d.owner else None,
             "project_id": doc.project_id, "project": doc.project.name if doc.project else None,
-            "tags": doc.tags, "updated_at": doc.updated_at.isoformat()}
+            "tags": doc.tags, "updated_at": doc.updated_at.isoformat(), "status": doc.status}
 
 
 # --- search ---------------------------------------------------------------------
@@ -171,7 +174,7 @@ def search(s: Session, user: User | None, emb: Embedder | None, query: str, f: F
     if not query:
         raise SearchError("query is empty")
     domains = scope(s, user, f)
-    cond = _conditions(s, f)
+    cond = _conditions(s, user, f)
     out = {"query": query, "semantic": emb is not None, "results": [],
            "pending": _pending(s, list(domains)) if domains else 0}
     if not domains or cond is None:
@@ -266,7 +269,7 @@ def find(s: Session, user: User | None, needle: str, f: Filters, *, whole_word: 
     if len(needle) > 200:
         raise SearchError("text to find is longer than 200 characters")
     domains = scope(s, user, f)
-    cond = _conditions(s, f)
+    cond = _conditions(s, user, f)
     out = {"text": needle, "whole_word": whole_word, "case_sensitive": case_sensitive,
            "results": [], "limited": False}
     if not domains or cond is None:

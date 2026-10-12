@@ -46,7 +46,8 @@ def _stem(t: str) -> str:
 
 def in_domain(s: Session, domain_id: str) -> set[str]:
     return set(s.scalars(select(DocumentTag.tag).join(Document)
-                         .where(Document.domain_id == domain_id).distinct()))
+                         .where(Document.domain_id == domain_id,
+                                Document.status == "published").distinct()))
 
 
 def near_matches(new: list[str], existing: set[str]) -> dict[str, list[str]]:

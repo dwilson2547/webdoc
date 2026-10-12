@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import re
+import threading
+import time
 from datetime import datetime
 from urllib.parse import quote, urlsplit
 
@@ -25,14 +27,15 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.routing import Route
 
-from . import (__version__, access, auth, documents, domains, embeddings, events, export, feed,
+from . import (__version__, access, auth, contributions, documents, domains, embeddings, events,
+               export, feed, scan,
                indexer as indexing, leases, mcp_server, oauth, oidc, proposals, search, sections,
                shares, styleguide, tags as tagmod, templates, tokens)
 from .activity import Actor
 from .config import Settings
 from .db import Database
 from .models import (PLATFORM, AccessToken, Document, DocumentTag, Domain, DomainRevision,
-                     OAuthGrant, ShareLink, StyleGuide, Template, TemplateRevision, User, utcnow)
+                     OAuthGrant, Report, ShareLink, StyleGuide, Template, TemplateRevision, User, utcnow)
 
 log = logging.getLogger("webdoc")
 
@@ -42,6 +45,30 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
 NEXT_COOKIE = "wd_next"
 TAB_HEADER = "X-Webdoc-Tab"      # a browser tab's id, so leases tell tabs apart
 SSE_PING_S = 20
+ANON_SEARCHES_PER_MINUTE = 30
+
+
+class IpLimiter:
+    """Sliding one-minute window per client address, in memory (one replica).
+    Signed-out search is limited because each semantic query costs a CPU
+    embedding (design §4)."""
+
+    def __init__(self, per_minute: int):
+        self.per_minute, self.hits = per_minute, {}
+        self.lock = threading.Lock()
+
+    def allow(self, key: str) -> bool:
+        now = time.monotonic()
+        with self.lock:
+            if len(self.hits) > 10_000:
+                self.hits = {k: v for k, v in self.hits.items() if v and now - v[-1] < 60}
+            q = [x for x in self.hits.get(key, []) if now - x < 60]
+            if len(q) >= self.per_minute:
+                self.hits[key] = q
+                return False
+            q.append(now)
+            self.hits[key] = q
+            return True
 
 
 class NameIn(BaseModel):
@@ -78,7 +105,7 @@ class ProjectIn(BaseModel):
 
 class DocumentIn(BaseModel):
     domain_id: str = Field(max_length=32)
-    kind: str = Field(default="document", pattern="^(note|document)$")
+    kind: str = Field(default="document", pattern="^(note|document|contribution)$")
     title: str = Field(min_length=1, max_length=300)
     body: str = ""
     tags: list[str] = []
@@ -97,6 +124,59 @@ class DocumentPut(BaseModel):
     fields: dict[str, str | None] | None = None
     project_id: str | None = Field(default=None, max_length=32)
     domain_id: str | None = Field(default=None, max_length=32)
+    ack_warnings: bool = False
+    """Publish an edit to a public contribution despite scan warnings."""
+
+
+class ContribSettingsIn(BaseModel):
+    accepts: bool
+    types: list[str] = []
+
+
+class AckIn(BaseModel):
+    ack_warnings: bool = False
+
+
+class ReplyIn(BaseModel):
+    kind: str = Field(max_length=16)
+    body: str = Field(min_length=1, max_length=contributions.MAX_REPLY)
+    ack_warnings: bool = False
+
+
+class ReplyPatch(BaseModel):
+    kind: str | None = Field(default=None, max_length=16)
+    body: str | None = Field(default=None, max_length=contributions.MAX_REPLY)
+
+
+class AcceptIn(BaseModel):
+    reply_id: str | None = Field(default=None, max_length=32)
+
+
+class ConfirmIn(BaseModel):
+    reply_id: str | None = Field(default=None, max_length=32)
+    environment: str = Field(default="", max_length=contributions.MAX_ENV)
+
+
+class ModerateIn(BaseModel):
+    action: str = Field(pattern="^(hide|unhide|lock|unlock|duplicate|unduplicate)$")
+    reason: str = Field(default="", max_length=contributions.MAX_REASON)
+    of: str | None = Field(default=None, max_length=32)
+
+
+class ReplyModerateIn(BaseModel):
+    hidden: bool
+    reason: str = Field(default="", max_length=contributions.MAX_REASON)
+
+
+class ReportIn(BaseModel):
+    document_id: str = Field(max_length=32)
+    reply_id: str | None = Field(default=None, max_length=32)
+    reason: str = Field(min_length=1, max_length=contributions.MAX_REASON)
+
+
+class ResolveIn(BaseModel):
+    action: str = Field(pattern="^(dismiss|hide)$")
+    note: str = Field(default="", max_length=contributions.MAX_REASON)
 
 
 class TemplateIn(BaseModel):
@@ -208,9 +288,14 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         except leases.Locked as exc:
             raise HTTPException(423, {"message": str(exc),
                                       "lease": leases.describe(exc.lease)}) from None
+        except scan.Blocked as exc:
+            raise HTTPException(422, {"message": str(exc), "scan": exc.result,
+                                      "needs_ack": exc.needs_ack}) from None
+        except contributions.RateLimited as exc:
+            raise HTTPException(429, str(exc)) from None
         except (documents.DocError, domains.DomainError, sections.SectionError,
                 tagmod.TagError, templates.TemplateError, proposals.ProposalError,
-                search.SearchError, shares.ShareError) as exc:
+                search.SearchError, shares.ShareError, contributions.ContribError) as exc:
             raise HTTPException(422, str(exc)) from None
 
     # --- meta and auth ------------------------------------------------------
@@ -307,6 +392,8 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
 
     # --- search and activity -------------------------------------------------
 
+    anon_search = IpLimiter(ANON_SEARCHES_PER_MINUTE)
+
     def filters(source: str | None = None, domain_id: list[str] = Query([]),
                 project_id: str | None = None, kind: str | None = None, type: str | None = None,
                 tag: list[str] = Query([]), author: str | None = None,
@@ -318,14 +405,16 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                               updated_after=updated_after, updated_before=updated_before)
 
     @app.get("/api/search")
-    def run_search(q: str = Query(min_length=1, max_length=500),
+    def run_search(request: Request, q: str = Query(min_length=1, max_length=500),
                    mode: str = Query("semantic", pattern="^(semantic|find)$"),
                    whole_word: bool = True, case_sensitive: bool = False,
                    limit: int = Query(20, ge=1, le=100),
-                   f: search.Filters = Depends(filters), user: User | None = Depends(maybe_user),
-                   s: Session = Depends(session)):
+                   f: search.Filters = Depends(filters),
+                   user: User | None = Depends(maybe_user), s: Session = Depends(session)):
         """Everything the caller can read (design §8, §11): semantic search, or
         find for literal text."""
+        if user is None and not anon_search.allow(request.client.host if request.client else "?"):
+            raise HTTPException(429, "too many searches; sign in or wait a minute")
         if mode == "find":
             return guard(search.find, s, user, q, f, whole_word=whole_word,
                          case_sensitive=case_sensitive, limit=limit)
@@ -352,6 +441,9 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         o["projects"] = [domains.project_out(p) for p in domains.projects(s, d)]
         o["can"] = sorted(access.ROLES.get(o["role"] or "", ()))
         o["assignable"] = access.assignable(s, user, d)
+        o["contribution_type_names"] = (
+            {t: templates.resolve(s, d, t).name for t in d.contribution_types or []}
+            if d.scope == "public" else {})
         o["tags"] = sorted(tagmod.in_domain(s, d.id))
         return o
 
@@ -459,6 +551,12 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     @app.post("/api/documents", status_code=201)
     def create_document(body: DocumentIn, user: User = Depends(user_dep),
                         s: Session = Depends(session)):
+        if body.kind == "contribution":
+            d = guard(access.domain, s, user, body.domain_id)
+            doc = guard(contributions.draft, s, actor_for(user), d, title=body.title,
+                        body=body.body, type=body.type, fields=body.fields, tags=body.tags,
+                        max_bytes=limit)
+            return doc_full(s, doc, user)
         d = guard(access.domain, s, user, body.domain_id, access.WRITE)
         p = guard(access.project, s, user, body.project_id) if body.project_id else None
         spec = guard(templates.resolve, s, d, body.type) if body.type else None
@@ -476,6 +574,12 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         o["lease"] = leases.describe(leases.active(s, doc.id))
         o["can_share"] = (doc.domain.scope != "public"
                           and access.GRANTS in access.ROLES.get(role or "", ()))
+        # The author edits their own contribution without a role on the domain.
+        o["can_edit"] = access.doc_allows(user, doc, role, access.WRITE) and doc.deleted_at is None
+        o["can_delete"] = access.doc_allows(user, doc, role, access.DELETE)
+        o["status"] = doc.status
+        if doc.kind == "contribution":
+            o["contribution"] = contributions.thread(s, user, doc)
         if doc.template_type:
             try:
                 spec = templates.resolve(s, doc.domain, doc.template_type)
@@ -496,6 +600,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                      user: User = Depends(user_dep), s: Session = Depends(session)):
         doc = guard(access.document, s, user, doc_id, access.WRITE)
         guard(leases.check, s, doc.id, ui_holder(request, user))
+        guard(contributions.check_edit, doc, body.body, body.title, body.ack_warnings)
         target = guard(access.domain, s, user, body.domain_id, access.WRITE) \
             if body.domain_id and body.domain_id != doc.domain_id else None
         kw: dict = {}
@@ -652,6 +757,141 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         guard(access.domain, s, user, doc.domain_id, access.GRANTS)
         shares.revoke(s, actor_for(user), link)
         return Response(status_code=204)
+
+    # --- contributions (contributions.py, design §12) -------------------------
+    # Publishing is here and only here: these routes take browser sessions, and
+    # no MCP tool publishes, so a person always reads what goes public.
+
+    @app.patch("/api/domains/{domain_id}/contributions")
+    def contribution_settings(domain_id: str, body: ContribSettingsIn,
+                              user: User = Depends(user_dep), s: Session = Depends(session)):
+        d = guard(access.domain, s, user, domain_id, access.MODERATE)
+        guard(contributions.configure, s, actor_for(user), d, body.accepts, body.types)
+        return domain_detail(s, d, user)
+
+    @app.get("/api/documents/{doc_id}/scan")
+    def scan_document(doc_id: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id, access.WRITE)
+        return scan.scan(contributions.scan_text(doc))
+
+    @app.post("/api/documents/{doc_id}/publish")
+    def publish_document(doc_id: str, body: AckIn, user: User = Depends(user_dep),
+                         s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id, access.WRITE)
+        guard(contributions.publish, s, actor_for(user), doc, body.ack_warnings)
+        return doc_full(s, doc, user)
+
+    @app.post("/api/documents/{doc_id}/replies", status_code=201)
+    def post_reply(doc_id: str, body: ReplyIn, user: User = Depends(user_dep),
+                   s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        guard(contributions.add_reply, s, actor_for(user), doc, body.kind, body.body,
+              publish_now=True, ack_warnings=body.ack_warnings)
+        return doc_full(s, doc, user)
+
+    @app.patch("/api/replies/{reply_id}")
+    def edit_reply(reply_id: str, body: ReplyPatch, user: User = Depends(user_dep),
+                   s: Session = Depends(session)):
+        r, doc = guard(contributions.reply_for, s, user, reply_id)
+        guard(contributions.edit_reply_draft, r, actor_for(user), body.kind, body.body)
+        return doc_full(s, doc, user)
+
+    @app.post("/api/replies/{reply_id}/publish")
+    def publish_reply(reply_id: str, body: AckIn, user: User = Depends(user_dep),
+                      s: Session = Depends(session)):
+        r, doc = guard(contributions.reply_for, s, user, reply_id)
+        guard(contributions.publish_reply, s, actor_for(user), r, doc, body.ack_warnings)
+        return doc_full(s, doc, user)
+
+    @app.delete("/api/replies/{reply_id}")
+    def withdraw_reply(reply_id: str, user: User = Depends(user_dep),
+                       s: Session = Depends(session)):
+        r, doc = guard(contributions.reply_for, s, user, reply_id)
+        guard(contributions.withdraw_reply, s, actor_for(user), r, doc)
+        return doc_full(s, doc, user)
+
+    @app.post("/api/replies/{reply_id}/moderate")
+    def moderate_reply(reply_id: str, body: ReplyModerateIn, user: User = Depends(user_dep),
+                       s: Session = Depends(session)):
+        r, doc = guard(contributions.reply_for, s, user, reply_id)
+        guard(contributions.hide_reply, s, actor_for(user), r, doc, body.hidden, body.reason)
+        return doc_full(s, doc, user)
+
+    @app.post("/api/documents/{doc_id}/accept")
+    def accept_reply(doc_id: str, body: AcceptIn, user: User = Depends(user_dep),
+                     s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        r = guard(contributions.reply_for, s, user, body.reply_id)[0] if body.reply_id else None
+        guard(contributions.accept, s, actor_for(user), doc, r)
+        return doc_full(s, doc, user)
+
+    @app.post("/api/documents/{doc_id}/confirm")
+    def confirm(doc_id: str, body: ConfirmIn, user: User = Depends(user_dep),
+                s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        r = guard(contributions.reply_for, s, user, body.reply_id)[0] if body.reply_id else None
+        guard(contributions.confirm, s, actor_for(user), doc, r, body.environment)
+        return doc_full(s, doc, user)
+
+    @app.delete("/api/documents/{doc_id}/confirm")
+    def unconfirm(doc_id: str, reply_id: str | None = None, user: User = Depends(user_dep),
+                  s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        contributions.unconfirm(s, actor_for(user), doc, reply_id)
+        return doc_full(s, doc, user)
+
+    @app.post("/api/documents/{doc_id}/moderate")
+    def moderate(doc_id: str, body: ModerateIn, user: User = Depends(user_dep),
+                 s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        a, actor = body.action, actor_for(user)
+        if a in ("hide", "unhide"):
+            guard(contributions.hide, s, actor, doc, a == "hide", body.reason)
+        elif a in ("lock", "unlock"):
+            guard(contributions.lock, s, actor, doc, a == "lock")
+        else:
+            of = None
+            if a == "duplicate":
+                if not body.of:
+                    raise HTTPException(422, "say which contribution it duplicates (of)")
+                of = guard(access.document, s, user, body.of)
+            guard(contributions.mark_duplicate, s, actor, doc, of)
+        return doc_full(s, doc, user)
+
+    @app.post("/api/reports", status_code=201)
+    def file_report(body: ReportIn, user: User = Depends(user_dep), s: Session = Depends(session)):
+        doc = guard(access.document, s, user, body.document_id)
+        r = guard(contributions.reply_for, s, user, body.reply_id)[0] if body.reply_id else None
+        rep = guard(contributions.report, s, actor_for(user), doc, body.reason, r)
+        return {"id": rep.id, "status": rep.status}
+
+    @app.get("/api/reports")
+    def list_reports(user: User = Depends(user_dep), s: Session = Depends(session)):
+        return {"reports": [contributions.report_out(s, r)
+                            for r in contributions.open_reports(s, user)],
+                "moderates": bool(access.moderated_domain_ids(s, user))}
+
+    @app.post("/api/reports/{report_id}/resolve")
+    def resolve_report(report_id: str, body: ResolveIn, user: User = Depends(user_dep),
+                       s: Session = Depends(session)):
+        rep = s.get(Report, report_id)
+        if rep is None or rep.domain_id not in access.moderated_domain_ids(s, user):
+            raise HTTPException(404, "report not found")
+        guard(contributions.resolve_report, s, actor_for(user), rep, body.action, body.note)
+        return contributions.report_out(s, rep)
+
+    @app.get("/api/drafts")
+    def my_drafts(user: User = Depends(user_dep), s: Session = Depends(session)):
+        return contributions.drafts(s, user)
+
+    @app.get("/api/counts")
+    def counts(user: User = Depends(user_dep), s: Session = Depends(session)):
+        """Header badges: drafts waiting to be reviewed, proposals to decide,
+        open reports to handle."""
+        return {"drafts": contributions.draft_count(s, user),
+                "proposals": len(proposals.to_decide(s, user)),
+                "reports": len(contributions.open_reports(s, user)),
+                "moderates": bool(access.moderated_domain_ids(s, user))}
 
     @app.get("/api/s/{token}")
     def open_share(token: str, s: Session = Depends(session)):

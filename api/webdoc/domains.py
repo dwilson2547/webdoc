@@ -116,7 +116,8 @@ def counts(s: Session, domain_ids: list[str]) -> dict[str, tuple[int, object]]:
     if not domain_ids:
         return {}
     rows = s.execute(select(Document.domain_id, func.count(), func.max(Document.updated_at))
-                     .where(Document.domain_id.in_(domain_ids), Document.deleted_at.is_(None))
+                     .where(Document.domain_id.in_(domain_ids), Document.deleted_at.is_(None),
+                            Document.status == "published")
                      .group_by(Document.domain_id))
     return {r[0]: (r[1], r[2]) for r in rows}
 
@@ -126,6 +127,9 @@ def out(s: Session, d: Domain, user: User | None, stats=None) -> dict:
     return {"id": d.id, "slug": d.slug, "name": d.name, "description": d.description,
             "scope": d.scope, "owner": d.owner.username if d.owner else None,
             "role": access.role_on(s, user, d), "documents": n,
+            "accepts_contributions": d.accepts_contributions,
+            "contribution_types": list(d.contribution_types or []),
+            "can_contribute": user is not None and d.scope == "public" and d.accepts_contributions,
             "last_activity": (last or d.updated_at).isoformat()}
 
 

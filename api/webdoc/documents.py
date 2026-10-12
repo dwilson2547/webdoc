@@ -16,7 +16,7 @@ from . import access, events, sections, tags as tagmod, templates
 from .activity import Actor, record
 from .models import Document, DocumentRevision, DocumentTag, Domain, Project, User, utcnow
 
-KINDS = ("note", "document")
+KINDS = ("note", "document", "contribution")
 MAX_TITLE = 300
 DEFAULT_MAX_BYTES = 1024 * 1024
 
@@ -63,10 +63,16 @@ def _snapshot(s: Session, doc: Document, actor: Actor, summary: str,
     return rev
 
 
+def feed_domain(doc: Document) -> str | None:
+    """The domain an event about this document is filed under. A draft's
+    events have none, which the feed shows only to whoever made them."""
+    return None if doc.status == "draft" else doc.domain_id
+
+
 def create(s: Session, actor: Actor, d: Domain, *, kind: str, title: str, body: str = "",
            tags: list[str] | None = None, project: Project | None = None,
            spec: "templates.Spec | None" = None, fields: dict | None = None,
-           max_bytes: int = DEFAULT_MAX_BYTES) -> Document:
+           max_bytes: int = DEFAULT_MAX_BYTES, status: str = "published") -> Document:
     """With `spec` (a document type), the body defaults to the type's starter
     text, its default tags are added, and its required sections and fields must
     be present (design §6)."""
@@ -85,14 +91,16 @@ def create(s: Session, actor: Actor, d: Domain, *, kind: str, title: str, body: 
                    title=_title(title), body=_check_size(body, max_bytes), fields=clean,
                    template_type=spec.type if spec else None,
                    template_version=spec.version if spec else None, revision=1,
-                   created_by=actor.user.id)
+                   created_by=actor.user.id, status=status,
+                   published_at=utcnow() if status == "published" else None)
     s.add(doc)
     s.flush()
     _set_tags(s, doc, tagmod.clean(tags))
     s.flush()
-    what = f"{spec.name} document" if spec else kind
+    what = f"{spec.name} {kind}" if spec else kind
     _snapshot(s, doc, actor, f"created {what}")
-    record(s, actor, "document.create", "document", doc.id, f"created {what} {doc.title}", d.id)
+    record(s, actor, "document.create", "document", doc.id,
+           f"{'drafted' if status == 'draft' else 'created'} {what} {doc.title}", feed_domain(doc))
     return doc
 
 
@@ -144,6 +152,8 @@ def write(s: Session, actor: Actor, doc: Document, *, title: str | None = None,
             doc.fields = new_fields
             changed.append("fields")
     if domain is not None and domain.id != doc.domain_id:
+        if doc.kind == "contribution":
+            raise DocError("contributions stay in the domain they were posted to")
         doc.domain_id = domain.id
         doc.domain = domain
         changed.append(f"moved to {domain.name}")
@@ -163,7 +173,8 @@ def write(s: Session, actor: Actor, doc: Document, *, title: str | None = None,
     s.flush()
     note = summary or "changed " + ", ".join(changed)
     _snapshot(s, doc, actor, note, base=base_revision, restored_from=restored_from, source=source)
-    record(s, actor, "document.update", "document", doc.id, f"{doc.title}: {note}", doc.domain_id)
+    record(s, actor, "document.update", "document", doc.id, f"{doc.title}: {note}",
+           feed_domain(doc))
     events.queue(s, doc.id, {"type": "revision", "revision": doc.revision, "by": actor.label,
                              "user_id": actor.user.id, "client": actor.client, "summary": note})
     return True
@@ -181,7 +192,7 @@ def trash(s: Session, actor: Actor, doc: Document) -> None:
     doc.deleted_at, doc.deleted_by = utcnow(), actor.user.id
     events.queue(s, doc.id, {"type": "trashed", "by": actor.label})
     record(s, actor, "document.delete", "document", doc.id, f"moved {doc.title} to the trash",
-           doc.domain_id)
+           feed_domain(doc))
 
 
 def untrash(s: Session, actor: Actor, doc: Document) -> None:
@@ -190,14 +201,14 @@ def untrash(s: Session, actor: Actor, doc: Document) -> None:
     doc.deleted_at, doc.deleted_by = None, None
     events.queue(s, doc.id, {"type": "restored", "by": actor.label})
     record(s, actor, "document.restore", "document", doc.id, f"restored {doc.title} from the trash",
-           doc.domain_id)
+           feed_domain(doc))
 
 
 def purge(s: Session, actor: Actor, doc: Document) -> None:
     if doc.deleted_at is None:
         raise DocError("move the document to the trash before purging it")
     record(s, actor, "document.purge", "document", doc.id, f"permanently deleted {doc.title}",
-           doc.domain_id)
+           feed_domain(doc))
     events.queue(s, doc.id, {"type": "purged", "by": actor.label})
     s.delete(doc)
 
@@ -294,7 +305,8 @@ def listing(s: Session, user: User | None, *, domain_ids: list[str], project_id:
     """Documents in the given (already authorised) domains, newest first."""
     if not domain_ids:
         return [], 0
-    stmt = select(Document).where(Document.domain_id.in_(domain_ids))
+    stmt = select(Document).where(Document.domain_id.in_(domain_ids),
+                                  access.visible_documents(s, user))
     stmt = stmt.where(Document.deleted_at.is_not(None) if trashed else Document.deleted_at.is_(None))
     if project_id:
         stmt = stmt.where(Document.project_id == project_id)
