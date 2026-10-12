@@ -125,7 +125,7 @@ concurrent human work.
   mismatch).
 - Short per-document edit lease (copied from nodewright `leases.py`) while a human has the editor open
   or an agent holds `lock_document`.
-- Every write is a revision; named versions and restore as in nodewright §14.
+- Every write is a revision (history in §9).
 - Open browser tabs update live over SSE (nodewright `events.py`).
 
 ## 8. Search 📐
@@ -148,7 +148,37 @@ concurrent human work.
   personal — and every result is labelled with its source and domain so results never mix
   silently. Filters narrow it (§11).
 
-## 9. Activity log 📐
+## 9. History and activity log 📐
+
+### 9.1 Document history
+
+- Every write creates a revision storing the full markdown, the **actor** (user) and **client**
+  (OAuth client name, "web", or "token:<name>"), a short summary of what changed (sections touched),
+  and the base revision it applied to. A document's history reads "Claude Code changed §Auth"
+  without consulting the activity log.
+- Named versions and restore, as in nodewright §14. Restore is itself a new revision, never a
+  rewrite of history.
+- **Diffs** between any two revisions: a side-by-side/inline view in the history panel and a
+  `diff_versions(document_id, from, to=latest)` MCP tool returning a unified diff, so an agent can
+  see exactly what changed since it last read a document.
+- **Deletes go to trash.** A deleted document keeps its revisions and can be restored by anyone who
+  could edit it. Permanent purge is a separate action for the domain owner or an admin.
+- **Retention**: everything is kept. Markdown revisions are small; pruning is added only if storage
+  says so.
+
+### 9.2 History beyond documents
+
+Domains, templates, projects, role grants and moderation actions (hide, lock, merge, purge) are
+recorded too — templates and domains as revisions, the rest as events — so it is always visible who
+changed the domain list, who granted a role, or who hid a post.
+
+### 9.3 Visibility
+
+History follows read access: anyone who can read a document can read its history, signed-out
+visitors included for public documents. Content hidden by moderation is excluded from public
+history; moderators and admins see it.
+
+### 9.4 Activity log
 
 - `Event` rows for every create/update/delete/propose/approve, with actor (user), client (OAuth client
   name, e.g. "Claude Code", "claude.ai", or "web") and a short summary.
@@ -163,8 +193,8 @@ concurrent human work.
 |---|---|
 | Orient | `list_domains`, `list_projects`, `list_templates`, `get_template`, `get_style_guide` |
 | Read | `search` (semantic), `find` (literal), `get_document` (optionally one section), `list_documents` (filters), `get_backlinks` |
-| Write | `create_document`, `create_note`, `edit_document` (ops, §7), `set_tags`, `create_project`, `lock_document`, `unlock_document` |
-| History | `list_versions`, `save_version`, `whats_new` |
+| Write | `create_document`, `create_note`, `edit_document` (ops, §7), `set_tags`, `create_project`, `delete_document` (to trash), `restore_document`, `lock_document`, `unlock_document` |
+| History | `list_versions`, `get_version`, `diff_versions`, `save_version`, `restore_version`, `whats_new` |
 | Governance | `propose_domain`, `propose_domain_change`, `propose_template` |
 | Contributions | `search` with `scope=public`, `draft_contribution`, `reply`, `confirm` |
 
@@ -225,8 +255,8 @@ can be extracted later once both copies have settled):
 ## 14. Phases 📐
 
 1. **Core**: scaffold (copy nodewright auth/OAuth/tokens), roles model with admin + per-domain
-   reader/editor grants, domains (UI-only creation), projects, tags, notes + documents, revisions,
-   Toast UI editor, home page (personal section first), markdown export. MCP read/write tools.
+   reader/editor grants, domains (UI-only creation), projects, tags, notes + documents, document
+   history (§9.1: attributed revisions, named versions, diffs, trash), Toast UI editor, home page (personal section first), markdown export. MCP read/write tools.
 2. **Templates + governance**: template CRUD in UI, `get_template`/typed `create_document`
    validation, `propose_*` tools and the approval queue.
 3. **Search + activity**: chunking, fastembed, hybrid `search`, literal `find`, central search UI
