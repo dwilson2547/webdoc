@@ -163,14 +163,20 @@ concurrent human work.
 - Every write is a revision (history in §9).
 - Open browser tabs update live over SSE (nodewright `events.py`).
 
-## 8. Search 📐
+## 8. Search ✅ 0.3.0
 
 - **Embeddings run locally, in-process**: fastembed (ONNX, CPU) with
   `sentence-transformers/all-MiniLM-L6-v2` — the model doc-indexer settled on (its README records why
   bge-small was dropped). No external API, no GPU, no separate embedding service to deploy.
-  ⚠ unverified: CPU embed throughput in the cluster pod is enough for write-time embedding; fall back
-  to a background worker if not.
-- Chunking by markdown heading; re-embed only chunks whose text changed.
+  Built ✅: embedding runs in a background indexer thread (`indexer.py`), so writes never wait on
+  it; the model ships in the image (`/srv/models`). Measured locally: ~40 chunks/s on one thread,
+  ~245Mi resident in a read-only container with the model loaded.
+  ⚠ unverified: throughput in the cluster pod.
+- Chunking by markdown heading (a chunk per stretch of text between headings, long ones split at
+  paragraphs to ~1000 chars, each prefixed with title and heading path); re-embed only chunks
+  whose text changed. Documents carry `indexed_revision`; a stale one is re-chunked.
+- Semantic matches below cosine similarity 0.18 are dropped (calibrated on a small hand-made
+  sample 2026-10-12; tune with real data).
 - **Hybrid**: pgvector cosine + Postgres full-text (`tsvector`), merged by reciprocal rank fusion.
   pgvector ✅ is installed in webdoc's database (§13). SQLite dev mode does brute-force cosine in Python.
 - **`find`: strict literal lookup** alongside semantic `search` — whole-word or exact-phrase match
@@ -182,7 +188,7 @@ concurrent human work.
   personal — and every result is labelled with its source and domain so results never mix
   silently. Filters narrow it (§11).
 
-## 9. History and activity log 📐
+## 9. History and activity log ✅ (§9.4 in 0.3.0)
 
 ### 9.1 Document history
 
@@ -221,7 +227,7 @@ history; moderators and admins see it.
   injected at session start.
 - Web UI: a feed per user and per domain.
 
-## 10. MCP tools (v1) ✅ except search, find, backlinks, whats_new, locks and contributions
+## 10. MCP tools (v1) ✅ except backlinks, locks and contributions
 
 Built in 0.1.0 ✅: `list_domains` (with projects), `create_project`, `get_writing_guide`,
 `list_documents`, `get_document`, `create_document`, `create_note`, `edit_document`,
@@ -231,6 +237,8 @@ the planned `set_tags`), `delete_document`, `restore_document`, `list_versions`,
 Built in 0.2.0 ✅: `list_templates`, `get_template`, typed `create_document` (`type`, `fields`),
 `update_document` `fields`, `propose_domain`, `propose_domain_change`, `propose_template`,
 `list_proposals`.
+Built in 0.3.0 ✅: `search`, `find`, `whats_new` (excludes the calling app's own writes unless
+`include_own`; `since` reads without moving the cursor).
 
 | Area | Tools (full plan) |
 |---|---|
@@ -254,9 +262,11 @@ avoid duplicates.
   - Mode toggle: **Semantic** (default) or **Find** (literal, §8).
   - Filters: source, org, domain, project, kind (note / document / contribution), document type,
     tags, author, updated date range.
+  - Built ✅ 0.3.0: header search box, Semantic/Find toggle, filters for source, domain, kind,
+    updated (week/month/year), type, tag, author. Org and project filters wait for orgs / UI need.
 - Document view: rendered markdown with the Toast UI editor in markdown mode on edit, template
   guidance in a side panel, backlinks, version history.
-- Activity feed per user and per domain; the proposal approval queue for whoever controls a
+- Activity feed per user and per domain (✅ 0.3.0: home page, /activity, domain Activity tab); the proposal approval queue for whoever controls a
   taxonomy (§5); admin and org-moderator screens for roles (§4).
 
 ## 12. Public and org contribution domains 📐
@@ -304,7 +314,7 @@ can be extracted later once both copies have settled):
    history (§9.1: attributed revisions, named versions, diffs, trash), Toast UI editor, home page (personal section first), markdown export. MCP read/write tools.
 2. ✅ 0.2.0 **Templates + governance**: template CRUD in UI, `get_template`/typed `create_document`
    validation, `propose_*` tools and the approval queue.
-3. **Search + activity**: chunking, fastembed, hybrid `search`, literal `find`, central search UI
+3. ✅ 0.3.0 **Search + activity**: chunking, fastembed, hybrid `search`, literal `find`, central search UI
    with filters, events, `whats_new`, feed UI.
 4. **Sharing**: sharing personal domains (reader/editor), share links, live updates over SSE, leases.
 5. **Contributions**: public domains (home page Public section), drafts → human publish, replies, confirmations, moderation,

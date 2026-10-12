@@ -96,8 +96,9 @@ def whats_new(s: Session, user: User, client: str, *, since: datetime | None = N
         g = groups.get((e.target_kind, e.target_id))
         if g is None:
             o = event_out(e, docs, doms)
+            title = o["title"] or (o["domain"] if e.target_kind == "domain" else None)
             g = groups[(e.target_kind, e.target_id)] = {
-                "target_kind": e.target_kind, "target_id": e.target_id, "title": o["title"],
+                "target_kind": e.target_kind, "target_id": e.target_id, "title": title,
                 "domain": o["domain"], "exists": o["exists"], "last_at": o["at"], "changes": 0,
                 "by": [], "recent": []}
         g["changes"] += 1

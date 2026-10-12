@@ -79,6 +79,24 @@ export type Token = { id: string; name: string; prefix: string; created_at: stri
 export type NewToken = Token & { token: string; mcp_url: string };
 export type OAuthGrant = { id: string; client_name: string; created_at: string; last_used_at: string | null };
 export type Guide = { text: string; is_default: boolean };
+export type Source = "public" | "personal" | "shared";
+export type HitMeta = {
+  id: string; title: string; kind: Kind; type: string | null; domain_id: string; domain: string; source: Source;
+  owner: string | null; project_id: string | null; project: string | null; tags: string[]; updated_at: string;
+};
+export type SearchHit = HitMeta & { heading: string; snippet: string; matched: ("semantic" | "keyword" | "title")[]; score: number };
+export type FindMatch = { line: number; heading: string; text: string; in: "title" | "body" };
+export type FindHit = HitMeta & { count: number; matches: FindMatch[] };
+export type SearchResult = { query: string; semantic: boolean; pending: number; index_error: string | null; results: SearchHit[] };
+export type FindResult = { text: string; whole_word: boolean; case_sensitive: boolean; limited: boolean; results: FindHit[] };
+export type SearchParams = {
+  q: string; mode?: "semantic" | "find"; whole_word?: boolean; case_sensitive?: boolean; source?: string;
+  domain_id?: string; kind?: string; type?: string; tag?: string; author?: string; updated_after?: string; limit?: number;
+};
+export type ActivityEvent = {
+  id: string; at: string; by: string; client: string; action: string; summary: string; target_kind: string;
+  target_id: string; domain_id: string | null; domain: string | null; title: string | null; exists: boolean | null;
+};
 
 export const api = {
   config: () => call<Config>("GET", "/api/config"),
@@ -137,6 +155,11 @@ export const api = {
   revokeToken: (id: string) => call("DELETE", `/api/tokens/${id}`),
   oauthGrants: () => call<{ grants: OAuthGrant[] }>("GET", "/api/oauth/grants").then((r) => r.grants),
   revokeOAuthGrant: (id: string) => call("DELETE", `/api/oauth/grants/${id}`),
+  search: (p: SearchParams) => call<SearchResult>("GET", "/api/search" + qs({ ...p, mode: "semantic" })),
+  find: (p: SearchParams) =>
+    call<FindResult>("GET", "/api/search" + qs({ ...p, mode: "find", whole_word: p.whole_word === false ? "false" : undefined, case_sensitive: p.case_sensitive })),
+  activity: (p: { domain_id?: string; before?: string; limit?: number }) =>
+    call<{ events: ActivityEvent[]; more: boolean }>("GET", "/api/activity" + qs(p)),
   guide: () => call<Guide>("GET", "/api/writing-guide"),
   saveGuide: (text: string) => call<Guide>("PUT", "/api/writing-guide", { text }),
 };

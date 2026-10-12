@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { ActivityPage } from "./Activity";
 import { Agents } from "./Agents";
 import { api, ApiError, errText, type Config, type Me } from "./api";
 import { DocumentPage } from "./DocumentPage";
@@ -6,6 +7,7 @@ import { DomainPage } from "./DomainPage";
 import { Home } from "./Home";
 import { NewDocument } from "./NewDocument";
 import { Proposals } from "./Proposals";
+import { SearchPage, searchUrl } from "./Search";
 import { Templates } from "./Templates";
 import { Link, navigate, useLocation } from "./router";
 
@@ -34,11 +36,31 @@ function Routes({ me, onCount }: { me: Me | null; onCount: (n: number) => void }
   let m: RegExpMatchArray | null;
   if ((m = path.match(/^\/domain\/([a-f0-9]{32})$/))) return <DomainPage key={m[1]} id={m[1]} me={me} />;
   if ((m = path.match(/^\/d\/([a-f0-9]{32})$/))) return <DocumentPage id={m[1]} />;
+  if (path === "/search") return <SearchPage search={search} />;
+  if (path === "/activity") return <ActivityPage />;
   if (path === "/new" && me) return <NewDocument search={search} />;
   if (path === "/agents" && me) return <Agents />;
   if (path === "/templates" && me) return <Templates me={me} />;
   if (path === "/proposals" && me) return <Proposals onCount={onCount} />;
   return <Home me={me} />;
+}
+
+function HeaderSearch() {
+  const { path, search } = useLocation();
+  const current = path === "/search" ? new URLSearchParams(search).get("q") || "" : "";
+  const [q, setQ] = useState(current);
+  useEffect(() => setQ(current), [current]);
+  const go = () => {
+    if (!q.trim()) return;
+    // Keep the mode and filters when searching again from the results page.
+    const keep = path === "/search" ? Object.fromEntries(new URLSearchParams(search)) : {};
+    navigate(searchUrl({ ...keep, q: q.trim() }));
+  };
+  return (
+    <form className="header-search" role="search" onSubmit={(e) => { e.preventDefault(); go(); }}>
+      <input type="search" placeholder="Search everything…" aria-label="Search" value={q} onChange={(e) => setQ(e.target.value)} />
+    </form>
+  );
 }
 
 export default function App() {
@@ -68,7 +90,8 @@ export default function App() {
     <div className="app">
       <header className="topbar">
         <Link to="/" className="brand"><img src="/favicon.svg" alt="" width={20} height={20} /> webdoc</Link>
-        <span className="grow" />
+        <HeaderSearch />
+        <Link to="/activity">Activity</Link>
         {me ? (
           <>
             <Link to="/proposals">Proposals{pending > 0 && <span className="badge-count">{pending}</span>}</Link>

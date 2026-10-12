@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.0 — 2026-10-12
+
+Phase 3 (design §14): search, find and activity.
+
+- Search: hybrid semantic + full-text + title matching over everything the viewer can read,
+  merged by reciprocal rank fusion, one result per document with its best section and a snippet,
+  labelled public / personal / shared. Embeddings come from all-MiniLM-L6-v2 run in-process
+  (fastembed, model shipped in the image); pgvector and Postgres full-text indexes in production.
+- Find: literal lookup of a word or phrase (whole word and match case options) with line numbers
+  and sections, for error strings, identifiers and part numbers.
+- Search page reached from a search box in the header: Semantic / Find toggle; filters for source,
+  domain, kind, updated date, document type, tag and author; state in the URL.
+- Indexing runs in the background; writes never wait on it, and only changed sections are
+  re-embedded. Results say when recently changed documents are still being indexed.
+- Activity: feed on the home page, an Activity page, and an Activity tab per domain, showing who
+  changed what and through which app; it follows read access.
+- MCP: search, find, whats_new (changes since this app last asked, grouped per document; the
+  app's own writes are left out). Nothing is injected at session start.
+
 ## 0.2.0 — 2026-10-11
 
 Phase 2 (design §14): document types and the proposal queue.

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, errText, type DocMeta, type DomainDetail, type Kind, type Me } from "./api";
+import { ActivityList } from "./Activity";
 import { DomainSettings } from "./DomainSettings";
 import { Link, navigate } from "./router";
 import { ROLE_TEXT, ago } from "./util";
@@ -16,6 +17,7 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState(false);
   const [newProject, setNewProject] = useState<string | null>(null);
+  const [tab, setTab] = useState<"docs" | "activity">("docs");
 
   const loadDomain = useCallback(() => api.domain(id).then(setD, (e) => setError(errText(e))), [id]);
   const loadDocs = useCallback((more = false) =>
@@ -102,6 +104,11 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
           </>}
         </aside>
         <section className="doc-list">
+          <div className="tabs">
+            <button className={tab === "docs" ? "on" : ""} onClick={() => setTab("docs")}>Documents</button>
+            <button className={tab === "activity" ? "on" : ""} onClick={() => setTab("activity")}>Activity</button>
+          </div>
+          {tab === "activity" ? <ActivityList domainId={d.id} /> : <>
           <form className="row" onSubmit={(e) => { e.preventDefault(); set({ q: q.trim() || undefined }); }}>
             <input className="grow" placeholder="Filter by title" value={q} onChange={(e) => setQ(e.target.value)} />
           </form>
@@ -128,6 +135,7 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
             ))}
           </ul>
           {docs.length < total && <button onClick={() => void loadDocs(true)}>Load more ({total - docs.length})</button>}
+          </>}
         </section>
       </div>
       {settings && me && <DomainSettings domain={d} me={me} onClose={() => setSettings(false)}

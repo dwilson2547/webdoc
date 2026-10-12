@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, errText, type Domain, type Home as HomeData, type Me, type Scope } from "./api";
+import { ActivityList } from "./Activity";
 import { Link, navigate } from "./router";
 import { ROLE_TEXT, ago, Modal } from "./util";
 
@@ -82,6 +83,10 @@ export function Home({ me }: { me: Me | null }) {
       )}
       {me && data.shared.length > 0 && <Section title="Shared with you" domains={data.shared} empty="" />}
       {!me && <p className="muted">Sign in to keep your own notes and documents.</p>}
+      <section className="home-section">
+        <div className="row"><h2>Recent activity</h2><span className="grow" /><Link to="/activity">All</Link></div>
+        <ActivityList limit={8} compact />
+      </section>
       {creating && me && <NewDomain me={me} scope={creating} onClose={() => setCreating(null)} />}
     </div>
   );
