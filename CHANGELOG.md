@@ -2,7 +2,7 @@
 
 ## 0.1.0 — 2026-10-11
 
-Phase 1 (design §14), not yet deployed.
+Phase 1 (design §14). Live at https://webdoc.danwils.com (Argo app in infra/cluster-config).
 
 - Domains: personal (one created at first sign-in) and public (admins only), created and changed
   only in the web UI; every change recorded. Only an empty domain can be deleted.

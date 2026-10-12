@@ -10,7 +10,7 @@ agents over an OAuth MCP server, so web chats and local agents read and write th
 owner keeps a closed taxonomy of domains that agents can use but not change; documents carry
 attributed revision history with diffs, named versions and a trash.
 
-Status: **0.1.0, phase 1 built, not deployed.** Domains (personal and public), projects, tags,
+Status: **0.1.0 live** at https://webdoc.danwils.com (phase 1). Domains (personal and public), projects, tags,
 reader/editor/moderator grants with admins from an authentik group, signed-out reading of public
 domains, notes and documents with a Toast UI markdown editor, section-level edits for agents,
 history (who and through which app, diffs, named versions, restore), trash and purge, markdown
@@ -18,8 +18,6 @@ export, and the MCP server. Templates, search and the activity feed are next.
 Design and roadmap: [`docs/design.md`](docs/design.md).
 
 ## Connect an agent
-
-Once deployed (planned host `webdoc.danwils.com`):
 
 - Claude Code: `claude mcp add --transport http webdoc https://webdoc.danwils.com/mcp`
 - `mcpServers`-style clients: `{"mcpServers": {"webdoc": {"type": "http", "url": "https://webdoc.danwils.com/mcp"}}}`
