@@ -260,3 +260,13 @@ def test_writing_guide(client):
     assert client.get("/api/writing-guide").json()["is_default"] is True
     r = client.put("/api/writing-guide", json={"text": "Be brief."}, headers=H).json()
     assert r == {"text": "Be brief.", "is_default": False}
+
+
+def test_admins_cannot_open_other_peoples_personal_domains(app_and_provider, client):
+    app, provider = app_and_provider
+    admin = sign_in(app, provider, "boss", ["webdoc-admins"])
+    d = personal(client)
+    doc = new_doc(client, d["id"], "Private")
+    assert admin.get(f"/api/domains/{d['id']}").status_code == 404
+    assert admin.get(f"/api/documents/{doc['id']}").status_code == 404
+    assert admin.get(f"/api/documents?domain={d['id']}").status_code == 404

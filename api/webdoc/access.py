@@ -40,8 +40,11 @@ class Denied(Exception):
 
 
 def role_on(s: Session, user: User | None, d: Domain) -> str | None:
+    """Admins control public domains; personal domains are their owner's and
+    whoever they share with, admins included (design §4: admins review a
+    personal document only through a report, which is not built yet)."""
     if user is not None:
-        if user.is_admin:
+        if user.is_admin and d.scope == "public":
             return "admin"
         if d.scope == "personal" and d.owner_user_id == user.id:
             return "owner"
@@ -105,8 +108,7 @@ def document(s: Session, user: User | None, doc_id: str, action: str = READ,
 
 
 def visible_domains(s: Session, user: User | None) -> list[Domain]:
-    """Public domains, the user's own, and those shared with them. Admins can
-    open anyone's domain, but other people's personal domains are not listed."""
+    """Public domains, the user's own, and those shared with them."""
     q = select(Domain).where(Domain.scope == "public")
     if user is not None:
         shared = select(DomainGrant.domain_id).where(DomainGrant.user_id == user.id)
