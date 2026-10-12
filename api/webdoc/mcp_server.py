@@ -9,7 +9,7 @@ creates, renames or deletes a domain (design §5).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Annotated, Any, Callable, Literal
 
 from pydantic import Field
@@ -22,8 +22,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import (__version__, access, documents, domains, feed, proposals, search as searching,
-               sections, styleguide, tags as tagmod, templates, tokens)
+from . import (__version__, access, documents, domains, feed, leases, proposals,
+               search as searching, sections, styleguide, tags as tagmod, templates, tokens)
 from .activity import Actor
 from .config import Settings
 from .db import Database
@@ -62,6 +62,10 @@ the signed-in user who connected you, with their permissions.
 - Every write is a revision the user can see, attributed to you. Before a large rewrite,
   save_version names the current state so it can be restored. diff_versions shows what
   changed between revisions, e.g. since you last read a document.
+- If the user has a document open in the editor, writes to it are refused until they close it;
+  wait or tell the user rather than retrying in a loop. For a long series of edits to one
+  document, lock_document first (the user sees it and can still take over) and
+  unlock_document when done.
 - delete_document moves a document to the trash (restore_document brings it back).
   Don't delete what the user wrote unless asked.
 """
@@ -120,10 +124,24 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
             except documents.Conflict as exc:
                 raise ToolError(f"{exc}. Read it again and retry, or use edit_document, which "
                                 "applies to the latest revision.") from None
+            except leases.Locked as exc:
+                raise ToolError(f"{exc}. Try again after that, or ask the user; don't retry "
+                                "in a loop.") from None
             except (documents.DocError, domains.DomainError, sections.SectionError,
                     tagmod.TagError, templates.TemplateError, proposals.ProposalError,
                     searching.SearchError) as exc:
                 raise ToolError(str(exc)) from None
+
+    def holder(actor: Actor) -> leases.Holder:
+        return leases.Holder("agent", actor.user, actor.client, actor.label)
+
+    def writable(s: Session, user: User, actor: Actor, doc_id: str, action: str,
+                 trashed: bool = False):
+        """A document this agent may change now: allowed, and nobody else
+        holds its edit lease."""
+        doc = access.document(s, user, doc_id, action, trashed=trashed)
+        leases.check(s, doc.id, holder(actor))
+        return doc
 
     def url(doc_id: str) -> str:
         return f"{settings.public_url}/d/{doc_id}"
@@ -320,6 +338,9 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
             doc = access.document(s, user, document_id, trashed=revision is not None)
             o = documents.out(doc, role=access.role_on(s, user, doc.domain))
             o["url"] = url(doc.id)
+            lease = leases.describe(leases.active(s, doc.id))
+            if lease is not None:
+                o["being_edited"] = lease["message"]
             if revision is not None and revision != doc.revision:
                 r = documents.revision(s, doc, revision)
                 o.update(title=r.title, body=r.body, tags=list(r.tags or []), revision=r.revision)
@@ -387,7 +408,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                           min_length=1)]) -> dict:
         """Edit a document by section. Prefer this over rewriting the body."""
         def go(s, user, actor):
-            doc = access.document(s, user, document_id, access.WRITE)
+            doc = writable(s, user, actor, document_id, access.WRITE)
             done = documents.edit(s, actor, doc, ops, limit)
             return {"revision": doc.revision, "applied": done,
                     "outline": sections.outline(doc.body)}
@@ -405,7 +426,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         (moving needs edit rights on both). Replacing the whole body needs the
         base_revision you read, and fails if someone wrote since."""
         def go(s, user, actor):
-            doc = access.document(s, user, document_id, access.WRITE)
+            doc = writable(s, user, actor, document_id, access.WRITE)
             if body is not None and base_revision is None:
                 raise ToolError("replacing the body needs base_revision; or use edit_document")
             target = find_domain(s, user, domain, access.WRITE) if domain else None
@@ -426,7 +447,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
     def delete_document(ctx: Context, document_id: str) -> dict:
         """Move a document to the trash. It keeps its history and can be restored."""
         def go(s, user, actor):
-            doc = access.document(s, user, document_id, access.DELETE)
+            doc = writable(s, user, actor, document_id, access.DELETE)
             documents.trash(s, actor, doc)
             return {"trashed": doc.id}
         return run(ctx, go)
@@ -438,6 +459,26 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
             doc = access.document(s, user, document_id, access.DELETE, trashed=True)
             documents.untrash(s, actor, doc)
             return {"restored": doc.id, "url": url(doc.id)}
+        return run(ctx, go)
+
+    @server.tool()
+    def lock_document(ctx: Context, document_id: str,
+                      minutes: Annotated[int, Field(ge=1, le=15)] = 5) -> dict:
+        """Hold a document's edit lock for a series of edits, so the user doesn't
+        start editing underneath you. Calling it again renews it. The user sees
+        who holds it and can still take over from the editor."""
+        def go(s, user, actor):
+            doc = access.document(s, user, document_id, access.WRITE)
+            row = leases.take(s, doc.id, holder(actor), timedelta(minutes=minutes))
+            return {"lock": leases.describe(row)}
+        return run(ctx, go)
+
+    @server.tool()
+    def unlock_document(ctx: Context, document_id: str) -> dict:
+        """Release your edit lock when you're done."""
+        def go(s, user, actor):
+            doc = access.document(s, user, document_id)
+            return {"released": leases.release(s, doc.id, holder(actor))}
         return run(ctx, go)
 
     @server.tool()
@@ -475,7 +516,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
     def restore_version(ctx: Context, document_id: str, revision: int) -> dict:
         """Bring back an earlier revision's title, body and tags, as a new revision."""
         def go(s, user, actor):
-            doc = access.document(s, user, document_id, access.WRITE)
+            doc = writable(s, user, actor, document_id, access.WRITE)
             changed = documents.restore_version(s, actor, doc, revision, limit)
             return {"changed": changed, "revision": doc.revision}
         return run(ctx, go)

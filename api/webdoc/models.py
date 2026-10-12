@@ -413,6 +413,39 @@ class DocumentChunk(Base):
     embedding: Mapped[list | None] = mapped_column(Embedding(), nullable=True)
 
 
+class DocumentLease(Base):
+    """Who is editing a document right now (design §7): a person with the
+    editor open, or an agent that called lock_document. Writes by anyone
+    else are refused until it expires or is released (leases.py)."""
+    __tablename__ = "document_leases"
+
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
+    holder: Mapped[str] = mapped_column(String(160))
+    kind: Mapped[str] = mapped_column(String(8))            # ui | agent
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    label: Mapped[str] = mapped_column(String(160))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ShareLink(Base):
+    """A read-only link to one document for people without an account
+    (design §14 phase 4). The token is the credential; revoking deletes it."""
+    __tablename__ = "share_links"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    creator: Mapped[User | None] = relationship()
+
+
 class FeedCursor(Base):
     """Where whats_new left off, per user and client (design §9.4)."""
     __tablename__ = "feed_cursors"

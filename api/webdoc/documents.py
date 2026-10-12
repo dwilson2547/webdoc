@@ -12,7 +12,7 @@ import difflib
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import access, sections, tags as tagmod, templates
+from . import access, events, sections, tags as tagmod, templates
 from .activity import Actor, record
 from .models import Document, DocumentRevision, DocumentTag, Domain, Project, User, utcnow
 
@@ -164,6 +164,8 @@ def write(s: Session, actor: Actor, doc: Document, *, title: str | None = None,
     note = summary or "changed " + ", ".join(changed)
     _snapshot(s, doc, actor, note, base=base_revision, restored_from=restored_from, source=source)
     record(s, actor, "document.update", "document", doc.id, f"{doc.title}: {note}", doc.domain_id)
+    events.queue(s, doc.id, {"type": "revision", "revision": doc.revision, "by": actor.label,
+                             "user_id": actor.user.id, "client": actor.client, "summary": note})
     return True
 
 
@@ -177,6 +179,7 @@ def edit(s: Session, actor: Actor, doc: Document, ops: list[dict],
 
 def trash(s: Session, actor: Actor, doc: Document) -> None:
     doc.deleted_at, doc.deleted_by = utcnow(), actor.user.id
+    events.queue(s, doc.id, {"type": "trashed", "by": actor.label})
     record(s, actor, "document.delete", "document", doc.id, f"moved {doc.title} to the trash",
            doc.domain_id)
 
@@ -185,6 +188,7 @@ def untrash(s: Session, actor: Actor, doc: Document) -> None:
     if doc.deleted_at is None:
         raise DocError("the document is not in the trash")
     doc.deleted_at, doc.deleted_by = None, None
+    events.queue(s, doc.id, {"type": "restored", "by": actor.label})
     record(s, actor, "document.restore", "document", doc.id, f"restored {doc.title} from the trash",
            doc.domain_id)
 
@@ -194,6 +198,7 @@ def purge(s: Session, actor: Actor, doc: Document) -> None:
         raise DocError("move the document to the trash before purging it")
     record(s, actor, "document.purge", "document", doc.id, f"permanently deleted {doc.title}",
            doc.domain_id)
+    events.queue(s, doc.id, {"type": "purged", "by": actor.label})
     s.delete(doc)
 
 

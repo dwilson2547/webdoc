@@ -7,7 +7,9 @@ session, and every write the X-Webdoc header (auth.py).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
 import logging
 import os
 import re
@@ -15,7 +17,7 @@ from datetime import datetime
 from urllib.parse import quote, urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
@@ -23,14 +25,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.routing import Route
 
-from . import (__version__, access, auth, documents, domains, embeddings, export, feed,
-               indexer as indexing, mcp_server, oauth, oidc, proposals, search, sections,
-               styleguide, tags as tagmod, templates, tokens)
+from . import (__version__, access, auth, documents, domains, embeddings, events, export, feed,
+               indexer as indexing, leases, mcp_server, oauth, oidc, proposals, search, sections,
+               shares, styleguide, tags as tagmod, templates, tokens)
 from .activity import Actor
 from .config import Settings
 from .db import Database
 from .models import (PLATFORM, AccessToken, Document, DocumentTag, Domain, DomainRevision,
-                     OAuthGrant, StyleGuide, Template, TemplateRevision, User, utcnow)
+                     OAuthGrant, ShareLink, StyleGuide, Template, TemplateRevision, User, utcnow)
 
 log = logging.getLogger("webdoc")
 
@@ -38,6 +40,8 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
        "img-src 'self' data: blob: https:; font-src 'self'; connect-src 'self'; "
        "object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 NEXT_COOKIE = "wd_next"
+TAB_HEADER = "X-Webdoc-Tab"      # a browser tab's id, so leases tell tabs apart
+SSE_PING_S = 20
 
 
 class NameIn(BaseModel):
@@ -135,7 +139,8 @@ class _Issuer(BaseModel):
 
 def create_app(settings: Settings | None = None, provider: oidc.Provider | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
-    db = Database(settings.database_url)
+    broker = events.Broker()
+    db = Database(settings.database_url, broker)
     db.migrate()
     if provider is None and settings.oidc_enabled:
         provider = oidc.Provider(settings)
@@ -159,6 +164,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     app = FastAPI(title="webdoc", version=__version__, docs_url=None, redoc_url=None,
                   openapi_url=None, lifespan=lifespan)
     app.state.settings, app.state.db, app.state.indexer = settings, db, indexer
+    app.state.broker = broker
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -168,6 +174,9 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         response.headers.setdefault("Referrer-Policy", "same-origin")
         if request.url.path.startswith("/api/"):
             response.headers.setdefault("Cache-Control", "no-store")
+        if request.url.path.startswith(("/s/", "/api/s/")):
+            # Share links are private by obscurity; keep them out of search engines.
+            response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
         return response
 
     def session():
@@ -184,6 +193,10 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     def actor_for(user: User) -> Actor:
         return Actor(user, "web", "ui")
 
+    def ui_holder(request: Request, user: User) -> leases.Holder:
+        tab = re.sub(r"[^A-Za-z0-9_-]", "", request.headers.get(TAB_HEADER, ""))[:40]
+        return leases.Holder("ui", user, tab or "browser", user.username)
+
     def guard(fn, *args, **kw):
         """Run a domain/document operation, mapping its errors to HTTP."""
         try:
@@ -192,9 +205,12 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
             raise access.http(exc) from None
         except documents.Conflict as exc:
             raise HTTPException(409, {"message": str(exc), "current": exc.current}) from None
+        except leases.Locked as exc:
+            raise HTTPException(423, {"message": str(exc),
+                                      "lease": leases.describe(exc.lease)}) from None
         except (documents.DocError, domains.DomainError, sections.SectionError,
                 tagmod.TagError, templates.TemplateError, proposals.ProposalError,
-                search.SearchError) as exc:
+                search.SearchError, shares.ShareError) as exc:
             raise HTTPException(422, str(exc)) from None
 
     # --- meta and auth ------------------------------------------------------
@@ -457,6 +473,9 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         o["can_delete"] = access.DELETE in access.ROLES.get(role or "", ())
         o["can_purge"] = access.PURGE in access.ROLES.get(role or "", ())
         o["domain_scope"] = doc.domain.scope
+        o["lease"] = leases.describe(leases.active(s, doc.id))
+        o["can_share"] = (doc.domain.scope != "public"
+                          and access.GRANTS in access.ROLES.get(role or "", ()))
         if doc.template_type:
             try:
                 spec = templates.resolve(s, doc.domain, doc.template_type)
@@ -473,9 +492,10 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         return doc_full(s, doc, user)
 
     @app.put("/api/documents/{doc_id}")
-    def put_document(doc_id: str, body: DocumentPut, user: User = Depends(user_dep),
-                     s: Session = Depends(session)):
+    def put_document(doc_id: str, body: DocumentPut, request: Request,
+                     user: User = Depends(user_dep), s: Session = Depends(session)):
         doc = guard(access.document, s, user, doc_id, access.WRITE)
+        guard(leases.check, s, doc.id, ui_holder(request, user))
         target = guard(access.domain, s, user, body.domain_id, access.WRITE) \
             if body.domain_id and body.domain_id != doc.domain_id else None
         kw: dict = {}
@@ -488,8 +508,10 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         return doc_full(s, doc, user)
 
     @app.delete("/api/documents/{doc_id}", status_code=204)
-    def trash_document(doc_id: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+    def trash_document(doc_id: str, request: Request, user: User = Depends(user_dep),
+                       s: Session = Depends(session)):
         doc = guard(access.document, s, user, doc_id, access.DELETE)
+        guard(leases.check, s, doc.id, ui_holder(request, user))
         documents.trash(s, actor_for(user), doc)
         return Response(status_code=204)
 
@@ -540,9 +562,10 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                                             body.label))
 
     @app.post("/api/documents/{doc_id}/revisions/{number}/restore")
-    def restore_revision(doc_id: str, number: int, user: User = Depends(user_dep),
-                         s: Session = Depends(session)):
+    def restore_revision(doc_id: str, number: int, request: Request,
+                         user: User = Depends(user_dep), s: Session = Depends(session)):
         doc = guard(access.document, s, user, doc_id, access.WRITE)
+        guard(leases.check, s, doc.id, ui_holder(request, user))
         guard(documents.restore_version, s, actor_for(user), doc, number, limit)
         return doc_full(s, doc, user)
 
@@ -551,6 +574,88 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
              s: Session = Depends(session)):
         doc = guard(access.document, s, user, doc_id, trashed=True)
         return {"diff": guard(documents.diff, s, doc, a, b)}
+
+    # --- edit lease and live updates (design §7) -----------------------------
+
+    @app.get("/api/documents/{doc_id}/lease")
+    def get_lease(doc_id: str, user: User | None = Depends(maybe_user),
+                  s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        return {"lease": leases.describe(leases.active(s, doc.id))}
+
+    @app.post("/api/documents/{doc_id}/lease")
+    def take_lease(doc_id: str, request: Request, force: bool = False,
+                   user: User = Depends(user_dep), s: Session = Depends(session)):
+        """Take or renew this tab's lease while its editor is open; force takes
+        over from whoever holds it (anyone who may edit can)."""
+        doc = guard(access.document, s, user, doc_id, access.WRITE)
+        row = guard(leases.take, s, doc.id, ui_holder(request, user), force=force)
+        return {"lease": leases.describe(row)}
+
+    @app.delete("/api/documents/{doc_id}/lease")
+    def drop_lease(doc_id: str, request: Request, user: User = Depends(user_dep),
+                   s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        return {"released": leases.release(s, doc.id, ui_holder(request, user))}
+
+    @app.get("/api/documents/{doc_id}/events")
+    async def document_events(doc_id: str, request: Request):
+        """Server-sent events for one document: new revisions (with who made
+        them), lease changes, trash and restore. Whoever can read the document
+        can listen, signed-out visitors of public domains included."""
+        with db.session() as s:
+            user = auth.user_for_request(s, request, settings)
+            doc = guard(access.document, s, user, doc_id)
+            hello = {"type": "hello", "revision": doc.revision,
+                     "lease": leases.describe(leases.active(s, doc.id))}
+        q = broker.subscribe(doc_id)
+
+        async def stream():
+            try:
+                yield f"data: {json.dumps(hello)}\n\n"
+                while True:
+                    try:
+                        ev = await asyncio.wait_for(q.get(), SSE_PING_S)
+                    except asyncio.TimeoutError:
+                        if await request.is_disconnected():
+                            return
+                        yield ": ping\n\n"
+                        continue
+                    yield f"data: {json.dumps(ev)}\n\n"
+            finally:
+                broker.unsubscribe(doc_id, q)
+
+        return StreamingResponse(stream(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    # --- read-only share links (shares.py) ------------------------------------
+
+    @app.get("/api/documents/{doc_id}/shares")
+    def list_shares(doc_id: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        guard(access.domain, s, user, doc.domain_id, access.GRANTS)
+        return {"shares": [shares.out(x, settings.public_url)
+                           for x in shares.for_document(s, doc.id)]}
+
+    @app.post("/api/documents/{doc_id}/shares", status_code=201)
+    def create_share(doc_id: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id)
+        guard(access.domain, s, user, doc.domain_id, access.GRANTS)
+        return shares.out(guard(shares.create, s, actor_for(user), doc), settings.public_url)
+
+    @app.delete("/api/shares/{share_id}", status_code=204)
+    def revoke_share(share_id: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+        link = s.get(ShareLink, share_id)
+        if link is None:
+            raise HTTPException(404, "no such share link")
+        doc = guard(access.document, s, user, link.document_id, trashed=True)
+        guard(access.domain, s, user, doc.domain_id, access.GRANTS)
+        shares.revoke(s, actor_for(user), link)
+        return Response(status_code=204)
+
+    @app.get("/api/s/{token}")
+    def open_share(token: str, s: Session = Depends(session)):
+        return shares.shared_out(guard(shares.resolve, s, token))
 
     @app.get("/api/tags")
     def list_tags(domain: str | None = None, user: User | None = Depends(maybe_user),
