@@ -1,0 +1,38 @@
+image:
+  repository: dwilson2547/webdoc
+  # A release from CHANGELOG.md. Bumping this is how a release reaches the
+  # cluster; :latest is pushed too, but the chart doesn't follow it.
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+# Public (Traefik pubsecure, letsencrypt-prod, external-dns). Public domains are
+# readable signed out; everything else needs an authentik session.
+ingress:
+  host: webdoc.danwils.com
+  tlsSecretName: webdoc-danwils-tls
+
+# Applied by hand; key DATABASE_URL (cluster Postgres).
+databaseSecret: webdoc-db
+
+# authentik OIDC client. The redirect URI derives from ingress.host.
+oidc:
+  issuer: https://auth.danwils.com/application/o/webdoc/
+  clientId: webdoc
+  secretName: webdoc-oidc   # key client_secret
+  # Members of this authentik group are webdoc admins (design §4).
+  adminGroup: webdoc-admins
+  # Same LAN route to authentik as nodewright: the pod has no IPv6 route and
+  # auth.danwils.com resolves to Cloudflare IPv6 only.
+  hostAliases:
+    - ip: 192.168.0.65
+      hostnames:
+        - auth.danwils.com
+
+# One replica: migrations run at startup.
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi

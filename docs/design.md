@@ -57,7 +57,7 @@ Chunk   heading-scoped text + embedding + tsvector, for search
 - **Storage**: markdown is the source of truth so a domain exports as a folder of `.md` files with
   frontmatter (Obsidian-openable), the way nodewright keeps JSON Canvas.
 
-## 4. Roles and permissions 📐
+## 4. Roles and permissions ✅ (0.1.0, `access.py`, `domains.py`; orgs 📐)
 
 Everyone who writes signs in through the cluster's authentik, outside contributors included;
 signed-out visitors can read public domains (below). Four roles:
@@ -84,6 +84,18 @@ signed-out visitors can read public domains (below). Four roles:
   rule in §5 binds agents of admins and moderators too: they can propose, not approve.
 - One role per user per scope; the effective permission on a document is the strongest grant that
   covers its domain.
+- **How admins are set** ✅: membership of an authentik group (`ADMIN_GROUP`, chart value
+  `oidc.adminGroup`, default `webdoc-admins`), read from the ID token's `groups` claim at every
+  sign-in, so removing someone from the group demotes them at their next sign-in. ⚠ unverified:
+  that authentik's webdoc provider puts `groups` in the ID token; check when the provider is created.
+- **Admins and personal domains** ✅: admins can open any domain by id (their "full control"), but
+  other people's personal domains are never listed for them, so neither their home page nor their
+  agents' `list_domains` fills up with everyone's private notes.
+- **Permissions as built** ✅: actions are read / write / delete (trash and restore) / purge /
+  manage (rename, describe, delete the domain) / grants. Owner and admin: all. Moderator: read,
+  write, delete, grants (reader and editor only). Editor: read, write, delete. Reader: read.
+  Only an empty domain (trash included) can be deleted, so deleting one never takes documents
+  with it.
 
 ## 5. Domain governance 📐
 
@@ -115,14 +127,19 @@ default domain/tags, and a version.
   quality bar is expressed (e.g. an *issue resolution* type modelled on the `issue-documentation`
   skill: symptoms, environment, root cause, resolution, verification).
 
-## 7. Editing and concurrency 📐
+## 7. Editing and concurrency ✅ (0.1.0, `sections.py`, `documents.py`; leases and SSE 📐 phase 4)
 
 Like nodewright: edits are operations applied to the latest revision, so an agent never overwrites
 concurrent human work.
 
-- Ops: `replace_section(heading_path)`, `append_to_section`, `insert_section`, `delete_section`,
-  `set_frontmatter`, `replace_body` (whole-document; requires the caller's base revision and fails on
-  mismatch).
+- Ops ✅: `replace_section(heading_path)` (everything under the heading, subsections included),
+  `append_to_section`, `insert_section` (after / as last child of / at end), `delete_section`,
+  `replace_text` (exact text that must occur once), `append`. A heading path matches heading text
+  outer to inner and may skip levels; an ambiguous or unknown path fails with the candidates.
+  Headings inside fenced code don't count. Whole-body replacement is `update_document` with the
+  caller's `base_revision`, which fails on mismatch; the web editor saves the same way and offers
+  "save anyway" on a conflict (the other write stays in the history).
+- Title, tags and fields are columns, not frontmatter; they become frontmatter on export (§3).
 - Short per-document edit lease (copied from nodewright `leases.py`) while a human has the editor open
   or an agent holds `lock_document`.
 - Every write is a revision (history in §9).
@@ -189,11 +206,17 @@ history; moderators and admins see it.
 
 ## 10. MCP tools (v1) 📐
 
-| Area | Tools |
+Built in 0.1.0 ✅: `list_domains` (with projects), `create_project`, `get_writing_guide`,
+`list_documents`, `get_document`, `create_document`, `create_note`, `edit_document`,
+`update_document` (title, tags, project, domain move, or whole body with `base_revision`; replaces
+the planned `set_tags`), `delete_document`, `restore_document`, `list_versions`, `diff_versions`,
+`save_version`, `restore_version` (`get_document` takes `revision`, replacing `get_version`).
+
+| Area | Tools (full plan) |
 |---|---|
-| Orient | `list_domains`, `list_projects`, `list_templates`, `get_template`, `get_style_guide` |
+| Orient | `list_domains`, `list_templates`, `get_template`, `get_writing_guide` |
 | Read | `search` (semantic), `find` (literal), `get_document` (optionally one section), `list_documents` (filters), `get_backlinks` |
-| Write | `create_document`, `create_note`, `edit_document` (ops, §7), `set_tags`, `create_project`, `delete_document` (to trash), `restore_document`, `lock_document`, `unlock_document` |
+| Write | `create_document`, `create_note`, `edit_document` (ops, §7), `update_document`, `create_project`, `delete_document` (to trash), `restore_document`, `lock_document`, `unlock_document` |
 | History | `list_versions`, `get_version`, `diff_versions`, `save_version`, `restore_version`, `whats_new` |
 | Governance | `propose_domain`, `propose_domain_change`, `propose_template` |
 | Contributions | `search` with `scope=public`, `draft_contribution`, `reply`, `confirm` |
@@ -243,18 +266,17 @@ can be extracted later once both copies have settled):
   `shares.py`, `leases.py`, `events.py`, `storage.py` + `attachments.py`, `versions.py` patterns.
   New: `domains.py` (governance), `templates.py`, `sections.py` (markdown section ops),
   `search.py` (chunking, fastembed, hybrid query), `activity.py`, `contributions.py`, `mcp_server.py`.
-- `ui/` — Vite + React. Editor: **Toast UI Editor**, as in dan-wiki
-  (`ai/dan-wiki/frontend/src/components/MarkdownEditor.jsx` ✅ uses `@toast-ui/react-editor` 3.2.x on
-  React 18), in markdown mode with live preview; the WYSIWYG tab is hidden. ⚠ unverified: the React
-  wrapper works on React 19 (nodewright is on 19) — if not, wrap the vanilla `@toast-ui/editor`
-  directly, which is a small component. Prism syntax highlighting carried over from dan-wiki.
+- `ui/` ✅ — Vite + React 19. Editor: **Toast UI Editor** 3.2.2, as in dan-wiki, driven directly
+  (`ui/src/markdown.tsx`) rather than through `@toast-ui/react-editor`, whose wrapper predates React
+  19; markdown mode with live preview, WYSIWYG tab hidden, Prism highlighting as in dan-wiki.
+  Toast UI's package hides its own types from bundler resolution, hence `ui/src/toastui.d.ts`.
 - `helm/webdoc/` — chart deployed by Argo; served at `webdoc.danwils.com` behind authentik, like
   nodewright.
 - Embedding model weights are baked into the image so pods don't download them at start.
 
 ## 14. Phases 📐
 
-1. **Core**: scaffold (copy nodewright auth/OAuth/tokens), roles model with admin + per-domain
+1. ✅ 0.1.0 **Core**: scaffold (copy nodewright auth/OAuth/tokens), roles model with admin + per-domain
    reader/editor grants, domains (UI-only creation), projects, tags, notes + documents, document
    history (§9.1: attributed revisions, named versions, diffs, trash), Toast UI editor, home page (personal section first), markdown export. MCP read/write tools.
 2. **Templates + governance**: template CRUD in UI, `get_template`/typed `create_document`
