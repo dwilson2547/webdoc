@@ -365,8 +365,8 @@ can be extracted later once both copies have settled):
    domains), live updates over SSE, leases.
 5. ✅ 0.5.0 **Contributions**: public domains (home page Public section), drafts → human publish, replies, confirmations, moderation,
    rate limits, secret scan.
-6. **Orgs**: orgs with moderators, their own closed taxonomies and member-only contribution
-   domains; home page Org section (aligned with nodewright's orgs/roles work).
+6. ~~**Orgs**~~ — dropped (user, 2026-10-12): webdoc keeps public and personal domains only. Org
+   mentions elsewhere in this doc (§3, §4, §11, §12) are historical and not planned.
 
 ## 15. Open questions
 
