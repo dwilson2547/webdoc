@@ -145,7 +145,7 @@ default tags, and a version.
   quality bar is expressed (e.g. an *issue resolution* type modelled on the `issue-documentation`
   skill: symptoms, environment, root cause, resolution, verification).
 
-## 7. Editing and concurrency ✅ (0.1.0, `sections.py`, `documents.py`; leases and SSE 📐 phase 4)
+## 7. Editing and concurrency ✅ (0.1.0, `sections.py`, `documents.py`; leases and SSE 0.4.0)
 
 Like nodewright: edits are operations applied to the latest revision, so an agent never overwrites
 concurrent human work.
@@ -158,10 +158,17 @@ concurrent human work.
   caller's `base_revision`, which fails on mismatch; the web editor saves the same way and offers
   "save anyway" on a conflict (the other write stays in the history).
 - Title, tags and fields are columns, not frontmatter; they become frontmatter on export (§3).
-- Short per-document edit lease (copied from nodewright `leases.py`) while a human has the editor open
-  or an agent holds `lock_document`.
+- Short per-document edit lease (adapted from nodewright `leases.py`) while a human has the editor open
+  or an agent holds `lock_document`. ✅ 0.4.0: the editor's tab holds it (45 s, renewed every 15 s,
+  dropped on leaving); `lock_document` 1-15 min. Writes by anyone else are refused (HTTP 423 /
+  tool error naming the holder); anyone who may edit can take over from the editor. Unlike
+  nodewright, writes respect a lease but don't take one: section ops already apply to the latest
+  revision, so the lease only prevents editing under someone, and a single agent edit shouldn't
+  lock the user out.
 - Every write is a revision (history in §9).
-- Open browser tabs update live over SSE (nodewright `events.py`).
+- Open browser tabs update live over SSE (nodewright `events.py`). ✅ 0.4.0: per-document stream
+  of revisions (who, which client, summary), lease changes, trash/restore/purge, published after
+  commit; in-process broker, so one replica (LISTEN/NOTIFY needed for more).
 
 ## 8. Search ✅ 0.3.0
 
@@ -227,7 +234,7 @@ history; moderators and admins see it.
   injected at session start.
 - Web UI: a feed per user and per domain.
 
-## 10. MCP tools (v1) ✅ except backlinks, locks and contributions
+## 10. MCP tools (v1) ✅ except backlinks and contributions
 
 Built in 0.1.0 ✅: `list_domains` (with projects), `create_project`, `get_writing_guide`,
 `list_documents`, `get_document`, `create_document`, `create_note`, `edit_document`,
@@ -237,6 +244,8 @@ the planned `set_tags`), `delete_document`, `restore_document`, `list_versions`,
 Built in 0.2.0 ✅: `list_templates`, `get_template`, typed `create_document` (`type`, `fields`),
 `update_document` `fields`, `propose_domain`, `propose_domain_change`, `propose_template`,
 `list_proposals`.
+Built in 0.4.0 ✅: `lock_document`, `unlock_document`. Share links have no tool on purpose: a link
+hands read access outside the domain, so a person makes it.
 Built in 0.3.0 ✅: `search`, `find`, `whats_new` (excludes the calling app's own writes unless
 `include_own`; `since` reads without moving the cursor).
 
@@ -316,7 +325,9 @@ can be extracted later once both copies have settled):
    validation, `propose_*` tools and the approval queue.
 3. ✅ 0.3.0 **Search + activity**: chunking, fastembed, hybrid `search`, literal `find`, central search UI
    with filters, events, `whats_new`, feed UI.
-4. **Sharing**: sharing personal domains (reader/editor), share links, live updates over SSE, leases.
+4. ✅ 0.4.0 **Sharing**: sharing personal domains (reader/editor; built in 0.1.0), read-only share
+   links per document (created by whoever may grant roles on the domain; not for public
+   domains), live updates over SSE, leases.
 5. **Contributions**: public domains (home page Public section), drafts → human publish, replies, confirmations, moderation,
    rate limits, secret scan.
 6. **Orgs**: orgs with moderators, their own closed taxonomies and member-only contribution

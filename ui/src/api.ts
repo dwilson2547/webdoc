@@ -1,4 +1,17 @@
 // Every write carries X-Webdoc: the server's CSRF guard (api/webdoc/auth.py).
+// X-Webdoc-Tab names this browser tab, so edit leases tell two tabs of the same
+// person apart (api/webdoc/leases.py).
+
+function tabId(): string {
+  try {
+    let id = sessionStorage.getItem("wd-tab");
+    if (!id) sessionStorage.setItem("wd-tab", (id = crypto.randomUUID().replace(/-/g, "").slice(0, 16)));
+    return id;
+  } catch {
+    return Math.random().toString(36).slice(2, 18);
+  }
+}
+export const TAB_ID = tabId();
 
 export class ApiError extends Error {
   status: number;
@@ -12,7 +25,7 @@ export class ApiError extends Error {
 }
 
 async function call<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const headers: Record<string, string> = { "X-Webdoc": "1" };
+  const headers: Record<string, string> = { "X-Webdoc": "1", "X-Webdoc-Tab": TAB_ID };
   if (body !== undefined) headers["Content-Type"] = "application/json";
   const r = await fetch(url, {
     method,
@@ -60,8 +73,19 @@ export type TemplateSpec = {
 export type TemplateCheck = { missing_sections: string[]; missing_fields: string[] };
 export type Doc = DocMeta & {
   body: string; role: Role | null; can_edit: boolean; can_delete: boolean; can_purge: boolean; domain_scope: Scope;
+  lease: Lease | null; can_share: boolean;
   template?: (TemplateSpec & { check: TemplateCheck }) | null;
 };
+export type Lease = {
+  holder: string; kind: "ui" | "agent"; user_id: string; label: string; expires_at: string; seconds_left: number; message: string;
+};
+export type ShareLink = { id: string; document_id: string; url: string; created_at: string; by: string | null; views: number; last_viewed_at: string | null };
+export type SharedDoc = { title: string; body: string; kind: Kind; type: string | null; fields: Record<string, string>; tags: string[]; updated_at: string; revision: number };
+export type DocEvent =
+  | { type: "hello"; revision: number; lease: Lease | null }
+  | { type: "revision"; revision: number; by: string; user_id: string; client: string; summary: string }
+  | { type: "lease"; lease: Lease | null }
+  | { type: "trashed" | "restored" | "purged"; by: string };
 export type Proposal = {
   id: string; kind: "domain.create" | "domain.update" | "template.create" | "template.update";
   status: "pending" | "approved" | "rejected" | "withdrawn"; payload: any; rationale: string; scope: Scope;
@@ -133,6 +157,17 @@ export const api = {
     call<Revision & { title: string; body: string; tags: string[] }>("GET", `/api/documents/${id}/revisions/${n}`),
   nameRevision: (id: string, n: number, label: string | null) => call<Revision>("PATCH", `/api/documents/${id}/revisions/${n}`, { label }),
   restoreRevision: (id: string, n: number) => call<Doc>("POST", `/api/documents/${id}/revisions/${n}/restore`),
+  takeLease: (id: string, force = false) => call<{ lease: Lease }>("POST", `/api/documents/${id}/lease` + qs({ force })).then((r) => r.lease),
+  dropLease: (id: string) => call<{ released: boolean }>("DELETE", `/api/documents/${id}/lease`),
+  /** For page unload, when an awaited request would be cut off. */
+  dropLeaseBeacon: (id: string) => {
+    void fetch(`/api/documents/${id}/lease`, { method: "DELETE", keepalive: true, credentials: "same-origin",
+      headers: { "X-Webdoc": "1", "X-Webdoc-Tab": TAB_ID } }).catch(() => undefined);
+  },
+  shares: (id: string) => call<{ shares: ShareLink[] }>("GET", `/api/documents/${id}/shares`).then((r) => r.shares),
+  createShare: (id: string) => call<ShareLink>("POST", `/api/documents/${id}/shares`),
+  revokeShare: (shareId: string) => call("DELETE", `/api/shares/${shareId}`),
+  shared: (token: string) => call<SharedDoc>("GET", `/api/s/${encodeURIComponent(token)}`),
   diff: (id: string, a: number, b?: number) => call<{ diff: string }>("GET", `/api/documents/${id}/diff` + qs({ a, b })).then((r) => r.diff),
   tags: (domain?: string) => call<{ tags: { tag: string; count: number }[] }>("GET", "/api/tags" + qs({ domain })).then((r) => r.tags),
   domainTemplates: (domainId: string) =>

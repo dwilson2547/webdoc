@@ -10,13 +10,14 @@ agents over an OAuth MCP server, so web chats and local agents read and write th
 owner keeps a closed taxonomy of domains that agents can use but not change; documents carry
 attributed revision history with diffs, named versions and a trash.
 
-Status: **0.3.0** at https://webdoc.danwils.com (phases 1-3). Domains (personal and public),
+Status: **0.4.0** at https://webdoc.danwils.com (phases 1-4). Domains (personal and public),
 projects, tags, reader/editor/moderator grants with admins from an authentik group, signed-out
 reading of public domains, notes and documents with a Toast UI markdown editor, section-level
 edits for agents, history (who and through which app, diffs, named versions, restore), trash,
 markdown export, document types with per-section guidance, and a proposal queue through which
 agents ask for new domains and types, semantic search and literal find across every readable
-source (embeddings computed in-process), and an activity feed with `whats_new` for agents.
+source (embeddings computed in-process), and an activity feed with `whats_new` for agents, edit leases so agents don't write under
+someone editing, live updates in open tabs, and read-only share links.
 Design and roadmap: [`docs/design.md`](docs/design.md).
 
 ## Connect an agent

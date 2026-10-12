@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError, errText, type Doc, type DomainDetail } from "./api";
+import { api, ApiError, errText, TAB_ID, type Doc, type DomainDetail, type Lease, type Me } from "./api";
+import { useDocEvents } from "./live";
+import { ShareDialog } from "./Share";
 import { HistoryPanel } from "./HistoryPanel";
 import { MarkdownEditor, MarkdownView, type EditorHandle } from "./markdown";
 import { Link, navigate } from "./router";
@@ -70,23 +72,94 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
   );
 }
 
-export function DocumentPage({ id }: { id: string }) {
+function clientText(client: string) {
+  return client === "web" ? "" : ` via ${client.replace(/^token:/, "")}`;
+}
+
+export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
   const [doc, setDoc] = useState<Doc | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [history, setHistory] = useState(false);
-  const load = () => api.document(id).then(setDoc, (e) => setError(errText(e)));
-  useEffect(() => { setEditing(false); void load(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const [sharing, setSharing] = useState(false);
+  const [lease, setLease] = useState<Lease | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [remote, setRemote] = useState<string | null>(null);
+  const load = () => api.document(id).then((d) => { setDoc(d); setLease(d.lease); }, (e) => setError(errText(e)));
+  useEffect(() => { setEditing(false); setRemote(null); setNotice(null); void load(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const mine = (l: Lease | null) => !!l && l.kind === "ui" && l.holder.endsWith(":" + TAB_ID);
+  const other = lease && !mine(lease) ? lease : null;
+
+  // Live updates: reload when someone else changes the document while it's
+  // being read; while editing, say so instead (the save will ask first).
+  useDocEvents(id, (e) => {
+    if (e.type === "hello") {
+      setLease(e.lease);
+      if (doc && e.revision > doc.revision && !editing) void load();
+    } else if (e.type === "lease") {
+      setLease(e.lease);
+    } else if (e.type === "revision") {
+      if (!doc || e.revision <= doc.revision) return;
+      const who = `${e.by.split(" via ")[0]}${clientText(e.client)}`;
+      if (editing) {
+        if (!(me && e.user_id === me.id && e.client === "web")) setRemote(`${who} saved revision ${e.revision} (${e.summary}) while you were editing.`);
+      } else {
+        void load();
+        setNotice(`Updated by ${who}: ${e.summary}`);
+      }
+    } else if (e.type === "trashed" || e.type === "restored") {
+      if (editing) setRemote(`${e.by} moved this document ${e.type === "trashed" ? "to the trash" : "out of the trash"}.`);
+      else void load();
+    } else if (e.type === "purged") {
+      setError(`${e.by} deleted this document permanently.`);
+    }
+  });
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(null), 8000);
+    return () => clearTimeout(t);
+  }, [notice]);
+
+  // While the editor is open this tab holds the lease, renewed every 15 s,
+  // and gives it up on leaving (or on closing the tab).
+  useEffect(() => {
+    if (!editing) return;
+    const renew = setInterval(() => {
+      api.takeLease(id).then(setLease, (e) => {
+        if (e instanceof ApiError && e.status === 423) setLease(e.body?.detail?.lease ?? null);
+      });
+    }, 15000);
+    const bye = () => api.dropLeaseBeacon(id);
+    window.addEventListener("pagehide", bye);
+    return () => {
+      clearInterval(renew);
+      window.removeEventListener("pagehide", bye);
+      bye();
+    };
+  }, [editing, id]);
 
   if (error) return <div className="page"><p className="error">{error}</p></div>;
   if (!doc) return <div className="page"><p className="muted">Loading…</p></div>;
 
+  const startEdit = async (force = false) => {
+    try {
+      setLease(await api.takeLease(doc.id, force));
+      setRemote(null);
+      setEditing(true);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 423) setLease(e.body?.detail?.lease ?? null);
+      else setError(errText(e));
+    }
+  };
+  const stopEdit = () => setEditing(false);
   const trash = async () => {
     if (!confirm(`Move "${doc.title}" to the trash? It can be restored.`)) return;
-    await api.trash(doc.id).catch((e) => setError(errText(e)));
-    navigate(`/domain/${doc.domain_id}`);
+    await api.trash(doc.id).then(() => navigate(`/domain/${doc.domain_id}`), (e) => setError(errText(e)));
   };
   const untrash = async () => setDoc(await api.untrash(doc.id));
+  const self = !!other && other.kind === "ui" && !!me && other.user_id === me.id;
+  const whoHolds = other && (other.kind === "agent" ? `${other.label.replace(" via token:", " via ")} (an agent)` : other.label);
 
   return (
     <div className={"page doc-page" + (history || (editing && doc.template) ? " with-side" : "")}>
@@ -101,15 +174,29 @@ export function DocumentPage({ id }: { id: string }) {
             {doc.can_delete && <button onClick={() => void untrash()}>Restore</button>}
           </div>
         )}
+        {other && (
+          <div className="banner lease">
+            {editing
+              ? <>{self ? "Another tab or window of yours" : whoHolds} took over editing. Your text is still here, but saving is blocked until {self ? "it lets go" : "they finish"}.</>
+              : self ? <>You have this document open in the editor in another tab or window.</>
+              : <>{whoHolds} {other.kind === "agent" ? "has this document locked for edits" : "is editing this document"}.</>}
+            {doc.can_edit && !doc.deleted_at && (
+              <button onClick={() => void startEdit(true)}>{editing ? "Take back" : "Edit anyway"}</button>
+            )}
+          </div>
+        )}
+        {notice && !editing && <div className="banner info">{notice}</div>}
+        {editing && remote && <div className="banner warn">{remote} Saving will ask before replacing their change.</div>}
         {editing ? (
-          <Editing doc={doc} onCancel={() => setEditing(false)} onSaved={(d) => { setDoc(d); setEditing(false); }} />
+          <Editing doc={doc} onCancel={stopEdit} onSaved={(d) => { setDoc(d); stopEdit(); }} />
         ) : (
           <>
             <div className="row doc-head">
               <h1>{doc.title}</h1>
               <span className="grow" />
-              {doc.can_edit && !doc.deleted_at && <button className="primary" onClick={() => setEditing(true)}>Edit</button>}
+              {doc.can_edit && !doc.deleted_at && !other && <button className="primary" onClick={() => void startEdit()}>Edit</button>}
               <button onClick={() => setHistory((h) => !h)}>History</button>
+              {doc.can_share && !doc.deleted_at && <button onClick={() => setSharing(true)}>Share</button>}
               <a className="button" href={`/api/documents/${doc.id}/export`}>.md</a>
               {doc.can_delete && !doc.deleted_at && <button onClick={() => void trash()}>Delete</button>}
             </div>
@@ -132,6 +219,7 @@ export function DocumentPage({ id }: { id: string }) {
       </div>
       {history && <HistoryPanel doc={doc} onClose={() => setHistory(false)} onRestored={(d) => setDoc(d)} />}
       {!history && editing && doc.template && <GuidancePanel spec={doc.template} check={doc.template.check} />}
+      {sharing && <ShareDialog doc={doc} onClose={() => setSharing(false)} />}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { Home } from "./Home";
 import { NewDocument } from "./NewDocument";
 import { Proposals } from "./Proposals";
 import { SearchPage, searchUrl } from "./Search";
+import { SharedPage } from "./Share";
 import { Templates } from "./Templates";
 import { Link, navigate, useLocation } from "./router";
 
@@ -35,7 +36,8 @@ function Routes({ me, onCount }: { me: Me | null; onCount: (n: number) => void }
   const { path, search } = useLocation();
   let m: RegExpMatchArray | null;
   if ((m = path.match(/^\/domain\/([a-f0-9]{32})$/))) return <DomainPage key={m[1]} id={m[1]} me={me} />;
-  if ((m = path.match(/^\/d\/([a-f0-9]{32})$/))) return <DocumentPage id={m[1]} />;
+  if ((m = path.match(/^\/d\/([a-f0-9]{32})$/))) return <DocumentPage id={m[1]} me={me} />;
+  if ((m = path.match(/^\/s\/([A-Za-z0-9_-]{16,64})$/))) return <SharedPage token={m[1]} />;
   if (path === "/search") return <SearchPage search={search} />;
   if (path === "/activity") return <ActivityPage />;
   if (path === "/new" && me) return <NewDocument search={search} />;

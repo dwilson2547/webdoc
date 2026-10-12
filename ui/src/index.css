@@ -164,3 +164,8 @@ mark { background: color-mix(in srgb, var(--accent) 25%, transparent); color: in
   .header-search { order: 10; flex-basis: 100%; max-width: none; margin: 0; }
   .search-page .filters { order: 2; border-top: 1px solid var(--border); padding-top: 12px; }
 }
+
+.banner.lease { border-color: #d08a1e; }
+.banner.info { border-color: var(--border); color: var(--muted); }
+.share-url { width: 100%; min-width: 260px; font-family: ui-monospace, monospace; font-size: 12px; }
+.shared-note { font-size: 13px; margin: 0 0 4px; }

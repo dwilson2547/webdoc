@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0 — 2026-10-12
+
+Phase 4 (design §14): leases, live updates, share links. (Sharing personal domains with
+readers and editors shipped in 0.1.0.)
+
+- Edit leases: opening the editor holds the document for that browser tab (renewed while open,
+  released on save, cancel or closing the tab). Others, other tabs and agents can't write it
+  meanwhile and see who is editing; anyone who may edit can take over ("Edit anyway").
+  Agents can hold a document with lock_document / unlock_document (1-15 minutes). Unlike
+  nodewright, writes don't take a lease themselves, so one agent edit doesn't lock the editor.
+- Live updates: an open document refreshes when someone else changes it and says who and
+  through which app; while editing it warns instead. Lease changes, trash and restore show
+  live too. Signed-out readers of public documents get them as well.
+- Read-only share links per document for people without an account: current text only, no
+  history or domain. Created and revoked by whoever may grant roles on the domain; view counts;
+  kept out of search engines. Public documents don't need them.
+- MCP: lock_document, unlock_document; get_document reports when someone is editing; writes
+  to a document someone else holds are refused with who and for how long.
+
 ## 0.3.0 — 2026-10-12
 
 Phase 3 (design §14): search, find and activity.
