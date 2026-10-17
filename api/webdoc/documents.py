@@ -14,7 +14,8 @@ from sqlalchemy.orm import Session
 
 from . import access, events, sections, tags as tagmod, templates, tree
 from .activity import Actor, record
-from .models import Attachment, Document, DocumentRevision, DocumentTag, Domain, User, utcnow
+from .models import (Attachment, Document, DocumentRevision, DocumentTag, Domain, User, new_id,
+                     utcnow)
 
 KINDS = ("note", "document", "contribution")
 MAX_TITLE = 300
@@ -72,7 +73,8 @@ def feed_domain(doc: Document) -> str | None:
 def create(s: Session, actor: Actor, d: Domain, *, kind: str, title: str, body: str = "",
            tags: list[str] | None = None, parent: Document | None = None,
            spec: "templates.Spec | None" = None, fields: dict | None = None,
-           max_bytes: int = DEFAULT_MAX_BYTES, status: str = "published") -> Document:
+           max_bytes: int = DEFAULT_MAX_BYTES, status: str = "published",
+           doc_id: str | None = None) -> Document:
     """With `spec` (a document type), the body defaults to the type's starter
     text, its default tags are added, and its required sections and fields must
     be present (design §6)."""
@@ -92,7 +94,8 @@ def create(s: Session, actor: Actor, d: Domain, *, kind: str, title: str, body: 
         if gaps["missing_sections"] or gaps["missing_fields"]:
             raise DocError(_gap_text(spec, gaps))
     pid = parent.id if parent else None
-    doc = Document(domain_id=d.id, parent_id=pid, position=tree.next_position(s, d.id, pid),
+    doc = Document(id=doc_id or new_id(), domain_id=d.id, parent_id=pid,
+                   position=tree.next_position(s, d.id, pid),
                    kind=kind,
                    title=_title(title), body=_check_size(body, max_bytes), fields=clean,
                    template_type=spec.type if spec else None,

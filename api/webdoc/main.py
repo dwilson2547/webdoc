@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 from starlette.routing import Route
 
 from . import (__version__, access, attachments, auth, contributions, documents, domains,
-               embeddings, events, export, feed, scan, storage, tree,
+               embeddings, events, export, feed, importer, scan, storage, tree,
                indexer as indexing, leases, mcp_server, oauth, oidc, proposals, search, sections,
                shares, styleguide, tags as tagmod, templates, tokens)
 from .activity import Actor, record
@@ -280,6 +280,21 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     def actor_for(user: User) -> Actor:
         return Actor(user, "web", "ui")
 
+    def sync_principal(request: Request, s: Session = Depends(session)) -> tuple[User | None, str]:
+        """The sync routes (export, manifest, import) also take a personal access
+        or OAuth token as a bearer, for the sync tool; everything else stays
+        browser-only. A token request needs no X-Webdoc header: a browser never
+        sends one cross-origin on its own."""
+        raw = tokens.bearer(request.headers.get("authorization"))
+        if raw:
+            who = tokens.principal(s, raw)
+            if who is None:
+                raise HTTPException(401, "the token is missing, expired or revoked")
+            return who.user, who.client_name
+        if request.method not in auth.SAFE_METHODS:
+            return auth.require_user(s, request, settings), "web"
+        return auth.user_for_request(s, request, settings), "web"
+
     def ui_holder(request: Request, user: User) -> leases.Holder:
         tab = re.sub(r"[^A-Za-z0-9_-]", "", request.headers.get(TAB_HEADER, ""))[:40]
         return leases.Holder("ui", user, tab or "browser", user.username)
@@ -493,12 +508,93 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                                "description": r.description, "by": names.get(r.actor_id),
                                "created_at": r.created_at.isoformat()} for r in rows]}
 
+    def page_in(s: Session, user: User | None, d, page_id: str | None):
+        if not page_id:
+            return None
+        page = guard(access.document, s, user, page_id)
+        if page.domain_id != d.id or page.kind == "contribution":
+            raise HTTPException(422, "that page isn't in this domain's tree")
+        return page
+
     @app.get("/api/domains/{domain_id}/export")
-    def export_domain(domain_id: str, user: User | None = Depends(maybe_user),
-                      s: Session = Depends(session)):
+    def export_domain(domain_id: str, under: str | None = None,
+                      who: tuple = Depends(sync_principal), s: Session = Depends(session)):
+        """The domain (or one page and everything below it) as markdown files
+        in a zip, laid out like the tree (export.py)."""
+        user = who[0]
         d = guard(access.domain, s, user, domain_id)
-        return Response(export.domain_zip(s, d, store), media_type="application/zip", headers={
-            "Content-Disposition": f'attachment; filename="{d.slug}.zip"'})
+        page = page_in(s, user, d, under)
+        name = d.slug + (f"-{export.stem(page.title)}" if page else "")
+        return Response(export.domain_zip(s, d, store, page), media_type="application/zip",
+                        headers={"Content-Disposition": "attachment; filename*=UTF-8''"
+                                 + quote(name + ".zip")})
+
+    @app.get("/api/domains/{domain_id}/manifest")
+    def domain_manifest(domain_id: str, under: str | None = None,
+                        who: tuple = Depends(sync_principal), s: Session = Depends(session)):
+        """What the sync tool compares against: every live page (or every page
+        under one) with its revision, and the attachment ids already stored."""
+        user = who[0]
+        d = guard(access.domain, s, user, domain_id)
+        page = page_in(s, user, d, under)
+        rows = s.scalars(select(Document).where(
+            Document.domain_id == d.id, Document.deleted_at.is_(None),
+            Document.kind != "contribution", access.visible_documents(s, user)))
+        keep = {page.id, *tree.descendant_ids(s, page)} if page else None
+        pages = [{"id": x.id, "title": x.title, "revision": x.revision, "parent_id": x.parent_id,
+                  "updated_at": x.updated_at.isoformat()}
+                 for x in rows if keep is None or x.id in keep]
+        ids = [x["id"] for x in pages]
+        files = list(s.scalars(select(Attachment.id).where(Attachment.document_id.in_(ids)))) \
+            if ids else []
+        return {"domain": {"id": d.id, "slug": d.slug, "name": d.name},
+                "under": {"id": page.id, "title": page.title, "parent_id": page.parent_id}
+                if page else None,
+                "role": access.role_on(s, user, d), "pages": pages, "attachments": files}
+
+    @app.post("/api/domains/{domain_id}/import")
+    async def import_archive(domain_id: str, request: Request, under: str | None = None,
+                             dry_run: bool = False, who: tuple = Depends(sync_principal),
+                             s: Session = Depends(session)):
+        """A .zip or .tar.gz of markdown as the body (importer.py). dry_run
+        returns the plan without writing anything."""
+        user, client = who
+        if user is None:
+            raise HTTPException(401, "not signed in")
+        d = guard(access.domain, s, user, domain_id, access.WRITE)
+        page = page_in(s, user, d, under)
+        cap = importer.MAX_ARCHIVE
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > cap:
+            raise HTTPException(413, f"archives are limited to {cap // (1024 * 1024)} MB")
+        chunks, size = [], 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > cap:
+                raise HTTPException(413, f"archives are limited to {cap // (1024 * 1024)} MB")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        if not data:
+            raise HTTPException(422, "the archive is empty")
+        try:
+            plan = await asyncio.to_thread(importer.plan, s, user, d, data, page, limit)
+        except importer.ImportError_ as exc:
+            raise HTTPException(422, str(exc)) from None
+        except access.Denied as exc:
+            raise access.http(exc) from None
+        if dry_run:
+            return importer.summary(plan, True)
+        uploaded: list[str] = []
+        try:
+            guard(importer.apply, s, Actor(user, client, "import"), plan, store, limit, uploaded)
+            s.flush()
+        except BaseException as exc:
+            # The transaction rolls back; take the files it stored with it.
+            drop_objects(uploaded)
+            if isinstance(exc, importer.ImportError_):
+                raise HTTPException(422, str(exc)) from None
+            raise
+        return importer.summary(plan, False)
 
     # --- grants -------------------------------------------------------------
 

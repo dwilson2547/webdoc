@@ -1,9 +1,10 @@
 """Personal access tokens: how an MCP client acts as a user.
 
 OAuth-issued tokens (oauth.py) are the other kind; `principal` resolves
-either. Only `/mcp` accepts them; the REST API stays cookie-only, so a leaked token
-can read and write documents but cannot mint more tokens, change roles or domains, or
-change the writing guide.
+either. `/mcp` accepts them, and so do the three sync routes (export, manifest,
+import) the sync tool uses; the rest of the REST API stays cookie-only, so a token
+cannot mint more tokens, change roles or domains, publish or moderate, or change
+the writing guide.
 """
 
 from __future__ import annotations

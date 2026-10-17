@@ -25,7 +25,7 @@ from .models import PLATFORM, Domain, Template, TemplateRevision, User, utcnow
 TYPE_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 FIELD_RE = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 RESERVED_FIELDS = {"title", "kind", "domain", "project", "tags", "type", "created", "updated",
-                   "webdoc_id"}
+                   "webdoc_id", "parent", "position", "revision"}
 COMMENT = re.compile(r"<!--(.*?)-->", re.S)
 OPTIONAL = re.compile(r"\s*\((?i:optional)\)\s*$")
 MAX_SKELETON = 50_000

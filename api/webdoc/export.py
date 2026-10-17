@@ -46,22 +46,28 @@ def markdown(doc: Document, body: str | None = None) -> str:
     meta["created"] = doc.created_at.isoformat()
     meta["updated"] = doc.updated_at.isoformat()
     meta["webdoc_id"] = doc.id
+    meta["revision"] = doc.revision
     head = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).strip()
     return f"---\n{head}\n---\n\n{doc.body if body is None else body}"
 
 
-def domain_zip(s: Session, d: Domain, store=None) -> bytes:
-    """Published, live pages of the domain. `store` (storage.Store) adds the
-    attachments; without one, links to them are left as they are."""
+def domain_zip(s: Session, d: Domain, store=None, under: Document | None = None) -> bytes:
+    """Published, live pages of the domain, or of one page and everything
+    below it (`under`). `store` (storage.Store) adds the attachments; without
+    one, links to them are left as they are."""
     docs = s.scalars(select(Document).where(Document.domain_id == d.id,
                                             Document.deleted_at.is_(None),
                                             Document.status == "published")
                      .order_by(Document.position, Document.title)).all()
+    if under is not None:
+        keep = {under.id, *tree.descendant_ids(s, under)}
+        docs = [x for x in docs if x.id in keep]
     by_id = {x.id: x for x in docs}
     kids: dict[str | None, list[Document]] = {}
     for x in docs:
         # A page whose parent isn't exported (a draft, a hidden page) goes to the top.
-        kids.setdefault(x.parent_id if x.parent_id in by_id else None, []).append(x)
+        kids.setdefault(x.parent_id if x.parent_id in by_id and x.id != getattr(under, "id", None)
+                        else None, []).append(x)
     files = {}
     if store is not None and docs:
         files = {a.id: a for a in s.scalars(select(Attachment).where(
@@ -69,9 +75,9 @@ def domain_zip(s: Session, d: Domain, store=None) -> bytes:
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        def write_level(parent_id: str | None, folder: str, depth: int) -> None:
+        def write_level(level: list[Document], folder: str, depth: int) -> None:
             used: set[str] = set()
-            for doc in kids.get(parent_id, []):
+            for doc in level:
                 name, n = stem(doc.title), 1
                 while name.lower() in used:
                     n += 1
@@ -83,9 +89,13 @@ def domain_zip(s: Session, d: Domain, store=None) -> bytes:
                                if m.group(1) in files else m.group(0)), doc.body)
                 z.writestr(f"{folder}{name}.md", markdown(doc, body))
                 if kids.get(doc.id):
-                    write_level(doc.id, f"{folder}{name}/", depth + 1)
+                    write_level(kids[doc.id], f"{folder}{name}/", depth + 1)
 
-        write_level(None, f"{d.slug}/", 1)
+        if under is None:
+            top = kids.get(None, [])
+        else:
+            top = [under] if under.id in by_id else []
+        write_level(top, f"{d.slug}/", 1)
         for a in files.values():
             try:
                 data = b"".join(store.get(a.key))
