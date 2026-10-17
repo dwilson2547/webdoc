@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.8.0 — 2026-10-17
+
+Archive import and a sync tool: phase 2 of the dan-wiki merge (design §16).
+
+- **Import** (domain page, or **Import here** on a page) takes a .zip or .tar.gz of markdown and
+  previews what it will do before writing anything. A webdoc export round-trips: pages that still
+  exist in the domain are updated in place (a new revision only where something changed), not
+  duplicated, and attachments come back. Any other folder of markdown works too: folders become
+  parent pages (or use `X.md` beside `X/`), titles come from frontmatter, the first heading or the
+  filename, frontmatter tags and simple fields carry over, relative links to images and files in
+  the archive become attachments, and links to other .md files become links to those pages.
+  Links inside code are left alone. Hidden files (`.obsidian/`, …) are ignored; anything unused
+  is listed as skipped. Limits: 100 MB archive, 500 MB unpacked, 5,000 files.
+- **`cli/webdoc_sync.py`**: pull a domain (or one page and what's below it) into a folder, see
+  what changed on either side, and push local edits, new files, moves and (with `--delete`)
+  deletions. Conflicts with server changes are reported and not written unless `--force`.
+- Export carries each page's `revision`, can cover a single page's subtree
+  (`?under=<page>`, and a **.zip** button on pages with children), and a new
+  `GET /api/domains/{id}/manifest` lists pages with their revisions.
+- Personal access and OAuth tokens now also work on the three sync routes (export, manifest,
+  import). Everything else in the REST API stays browser-only.
+
 ## 0.7.0 — 2026-10-17
 
 Page tree and attachments: the first phase of bringing dan-wiki's wiki features into webdoc

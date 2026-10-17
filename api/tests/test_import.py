@@ -86,7 +86,7 @@ def test_generic_folder_of_markdown(client, store):
     files = {
         "vault/Infra.md": "Infra overview, see [k8s](Infra/k8s.md).\n",
         "vault/Infra/k8s.md": "---\ntags: ops, k8s\nowner: dan\n---\n# Kubernetes\n\n![diagram](../img/a.png)\n",
-        "vault/Apps/webdoc.md": "# webdoc\n\nNotes.\n",
+        "vault/Apps/webdoc.md": "# webdoc\n\nNotes, e.g. `[x](img/a.png)`.\n\n```md\n![y](img/a.png)\n```\n",
         "vault/img/a.png": PNG,
         "vault/img/unused.png": PNG,
         "vault/.obsidian/app.json": "{}",
@@ -108,6 +108,10 @@ def test_generic_folder_of_markdown(client, store):
     assert got["body"] == f"# Kubernetes\n\n![diagram]({att['url']})\n"
     assert client.get(f"/api/documents/{infra['id']}").json()["body"] == \
         f"Infra overview, see [k8s](/d/{k8s['id']}).\n"
+    # Links in code are examples: left alone, and not counted as uses of the file.
+    web = next(x for x in r["created"] if x["title"] == "webdoc")
+    assert client.get(f"/api/documents/{web['id']}").json()["body"] == files["vault/Apps/webdoc.md"]
+    assert r["warnings"] == [w for w in r["warnings"] if "webdoc.md" not in w]
 
 
 def test_tar_gz_and_bad_archives(client):
@@ -146,13 +150,14 @@ def test_sync_manifest_conflicts_and_trash(client):
     a = new_doc(client, d["id"], "A")
     b = new_doc(client, d["id"], "B")
     c = new_doc(client, d["id"], "C")
-    files = export(client, d)
+    # The sync tool sends paths relative to its folder, without the export's wrapper.
+    files = {k.removeprefix("notes/"): v for k, v in export(client, d).items()}
     # Someone edits B on the server after the "pull".
     client.put(f"/api/documents/{b['id']}", json={"base_revision": 1, "body": "server\n"}, headers=H)
-    files["notes/A.md"] = files["notes/A.md"].replace(b"Ship.", b"local A")
-    files["notes/B.md"] = files["notes/B.md"].replace(b"Ship.", b"local B")
-    files["notes/New.md"] = b"# New\n"
-    del files["notes/C.md"]
+    files["A.md"] = files["A.md"].replace(b"Ship.", b"local A")
+    files["B.md"] = files["B.md"].replace(b"Ship.", b"local B")
+    files["New.md"] = b"# New\n"
+    del files["C.md"]
     files[".webdoc/push.json"] = json.dumps({"changed": ["A.md", "B.md", "New.md"],
                                              "check_revisions": True, "trash": [c["id"]]})
     r = do_import(client, d, make_zip(files)).json()

@@ -258,3 +258,11 @@ blockquote { border-left: 3px solid var(--border); margin: 4px 0; padding-left: 
 .parent-list li { padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .parent-list li:hover { background: var(--bg); }
 .parent-list li.on { color: var(--accent); font-weight: 600; }
+
+/* Import (ImportDialog.tsx) */
+.import-summary { margin-top: 12px; font-size: 14px; max-height: 50vh; overflow: auto; }
+.import-summary details { margin: 4px 0; }
+.import-summary summary { cursor: pointer; font-weight: 600; }
+.import-summary ul { margin: 4px 0; padding-left: 20px; }
+.import-done { display: block; }
+.import-done .import-summary { max-height: 30vh; }

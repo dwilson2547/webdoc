@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, ApiError, errText, getConfig, TAB_ID, type Attachment, type Config, type Doc, type Lease, type Me, type TreePage } from "./api";
 import { AttachmentsPanel } from "./Attachments";
+import { ImportDialog } from "./ImportDialog";
 import { useDocEvents } from "./live";
 import { ShareDialog } from "./Share";
 import { ContributionHead, ContributionThread, useScanGate } from "./Contribution";
@@ -98,6 +99,7 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
   const [editing, setEditing] = useState(false);
   const [history, setHistory] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [importing, setImporting] = useState(false);
   const [lease, setLease] = useState<Lease | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [remote, setRemote] = useState<string | null>(null);
@@ -246,7 +248,11 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
               <button onClick={() => setHistory((h) => !h)}>History</button>
               {doc.can_share && !doc.deleted_at && <button onClick={() => setSharing(true)}>Share</button>}
               {doc.can_report && !doc.contribution && <button className="flat-btn" onClick={() => void report()}>Report</button>}
-              <a className="button" href={`/api/documents/${doc.id}/export`}>.md</a>
+              <a className="button" href={`/api/documents/${doc.id}/export`} title="This page as markdown">.md</a>
+              {doc.children.length > 0 &&
+                <a className="button" href={`/api/domains/${doc.domain_id}/export?under=${doc.id}`} title="This page and the pages below it, as a zip">.zip</a>}
+              {doc.can_edit && !doc.deleted_at && doc.kind !== "contribution" &&
+                <button onClick={() => setImporting(true)} title="Import a zip or tar of markdown under this page">Import here</button>}
               {doc.can_delete && !doc.deleted_at && <button onClick={() => void trash()}>Delete</button>}
             </div>
             <div className="doc-meta muted">
@@ -286,6 +292,8 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
       {history && <HistoryPanel doc={doc} onClose={() => setHistory(false)} onRestored={(d) => setDoc(d)} />}
       {!history && editing && doc.template && <GuidancePanel spec={doc.template} check={doc.template.check} />}
       {sharing && <ShareDialog doc={doc} onClose={() => setSharing(false)} />}
+      {importing && <ImportDialog domainId={doc.domain_id} pages={tree.pages} under={doc.id} onClose={() => setImporting(false)}
+        onDone={() => { setImporting(false); void load(); void tree.reload(); }} />}
     </div>
   );
 }

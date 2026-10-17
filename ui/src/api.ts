@@ -118,6 +118,13 @@ export type Attachment = {
   id: string; document_id: string; name: string; content_type: string; size: number; image: boolean;
   url: string; markdown: string; by: string | null; created_at: string;
 };
+export type ImportItem = { path: string | null; title: string; id: string; reason?: string; revision?: number };
+/** What an archive import did, or would do (api/webdoc/importer.py summary). */
+export type ImportResult = {
+  dry_run: boolean; created: ImportItem[]; updated: ImportItem[]; unchanged: ImportItem[]; conflicts: ImportItem[];
+  trashed: { id: string; title: string }[]; attachments: { path: string; name: string; page: string }[];
+  skipped: { path: string | null; reason: string }[]; warnings: string[];
+};
 /** A page in a domain's tree, depth first (api/webdoc/tree.py flat). */
 export type TreePage = {
   id: string; title: string; kind: Kind; type: string | null; parent_id: string | null; position: number;
@@ -202,6 +209,15 @@ export const api = {
     return data as Attachment;
   },
   deleteAttachment: (id: string) => call("DELETE", `/api/attachments/${id}`),
+  importArchive: async (domainId: string, file: Blob, under: string | null, dryRun: boolean): Promise<ImportResult> => {
+    const r = await fetch(`/api/domains/${domainId}/import` + qs({ under, dry_run: dryRun }), {
+      method: "POST", credentials: "same-origin", body: file,
+      headers: { "X-Webdoc": "1", "X-Webdoc-Tab": TAB_ID, "Content-Type": "application/octet-stream" },
+    });
+    const data = await r.json().catch(() => null);
+    if (!r.ok) throw new ApiError(r.status, data);
+    return data as ImportResult;
+  },
   documents: (f: { domain?: string; under?: string; kind?: string; tag?: string; q?: string; trashed?: boolean; limit?: number; offset?: number }) =>
     call<{ total: number; documents: DocMeta[] }>("GET", "/api/documents" + qs(f)),
   createDocument: (body: { domain_id: string; kind: Kind; title: string; body: string; tags: string[]; parent_id: string | null; type?: string | null; fields?: Record<string, string> }) =>

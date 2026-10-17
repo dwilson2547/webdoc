@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, errText, type DocMeta, type DomainDetail, type Kind, type Me } from "./api";
+import { api, errText, type DocMeta, type DomainDetail, type ImportResult, type Kind, type Me } from "./api";
 import { ActivityList } from "./Activity";
 import { DomainSettings } from "./DomainSettings";
+import { ImportDialog, ImportSummary } from "./ImportDialog";
 import { PageTree, usePageTree } from "./PageTree";
 import { Link, navigate } from "./router";
 import { ROLE_TEXT, ago } from "./util";
@@ -19,6 +20,8 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
   const [settings, setSettings] = useState(false);
   const [tab, setTab] = useState<"docs" | "activity">("docs");
   const tree = usePageTree(id);
+  const [importing, setImporting] = useState(false);
+  const [imported, setImported] = useState<ImportResult | null>(null);
 
   const loadDomain = useCallback(() => api.domain(id).then(setD, (e) => setError(errText(e))), [id]);
   const loadDocs = useCallback((more = false) =>
@@ -59,11 +62,19 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
         {canWrite && <button className="primary" onClick={() => newDoc("document")}>New document</button>}
         {canWrite && <button onClick={() => newDoc("note")}>New note</button>}
         {d.can_contribute && <button className={canWrite ? "" : "primary"} onClick={() => newDoc("contribution")}>New contribution</button>}
+        {canWrite && <button onClick={() => setImporting(true)} title="Import a zip or tar of markdown">Import</button>}
         <a className="button" href={`/api/domains/${d.id}/export`} title="Download as markdown files">Export</a>
         {me && (d.can.includes("manage") || d.can.includes("grants")) &&
           <button onClick={() => setSettings(true)}>Settings</button>}
       </div>
       {d.description && <p className="muted domain-desc">{d.description}</p>}
+      {imported && (
+        <div className="banner info import-done">
+          Imported: {imported.created.length} new, {imported.updated.length} updated, {imported.attachments.length} files.
+          <button className="flat-btn" onClick={() => setImported(null)}>×</button>
+          <ImportSummary r={imported} />
+        </div>
+      )}
       <div className="domain-body">
         <aside className="filters">
           <h4>Pages</h4>
@@ -124,6 +135,8 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
           </>}
         </section>
       </div>
+      {importing && <ImportDialog domainId={d.id} pages={tree.pages} under={null} onClose={() => setImporting(false)}
+        onDone={(r) => { setImporting(false); setImported(r); void tree.reload(); void loadDocs(); }} />}
       {settings && me && <DomainSettings domain={d} me={me} onClose={() => setSettings(false)}
         onChanged={() => void loadDomain()} />}
     </div>

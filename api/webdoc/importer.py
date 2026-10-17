@@ -53,6 +53,16 @@ RESERVED = {"title", "kind", "domain", "parent", "position", "tags", "type", "cr
 # ](target) in markdown links and images; the target ends at whitespace or ")".
 LINK = re.compile(r"(\]\()(<[^>]+>|[^)\s]+)((?:\s+\"[^\"]*\")?\))")
 H1 = re.compile(r"^#\s+(.+?)\s*#*\s*$", re.M)
+FENCE = re.compile(r"^(```|~~~).*?^\1[^\S\n]*$|`[^`\n]+`", re.M | re.S)
+
+
+def _links(body: str):
+    """Markdown links outside fenced code and inline code, which are examples
+    rather than links and must come through untouched."""
+    code = [m.span() for m in FENCE.finditer(body)]
+    for m in LINK.finditer(body):
+        if not any(a <= m.start() < b for a, b in code):
+            yield m
 
 
 class ImportError_(ValueError):
@@ -241,8 +251,10 @@ def _node_from_md(path: str, raw: bytes, warnings: list[str]) -> Node:
 def plan(s: Session, user, d: Domain, data: bytes, under: Document | None = None,
          max_bytes: int = documents.DEFAULT_MAX_BYTES) -> Plan:
     warnings: list[str] = []
-    files = _strip_wrapper(read_archive(data, warnings))
+    files = read_archive(data, warnings)
     manifest: dict = {}
+    if MANIFEST not in files:
+        files = _strip_wrapper(files)        # the sync tool's paths are already relative
     if MANIFEST in files:
         try:
             manifest = json.loads(files.pop(MANIFEST).decode())
@@ -356,7 +368,7 @@ def _plan_links(s: Session, p: Plan) -> None:
     for n in p.nodes:
         if not n.path or n.action not in ("create", "update"):
             continue
-        for m in LINK.finditer(n.body):
+        for m in _links(n.body):
             target = _target_of(n, m.group(2))
             if target is None or target in by_path:
                 continue
@@ -386,7 +398,13 @@ def _rewrite(n: Node, p: Plan, existing: set[str], page_ids: dict[str, str]) -> 
             u = p.uploads[target]
             return f"{m.group(1)}/api/attachments/{u['id']}/{quote(u['name'])}{m.group(3)}"
         return m.group(0)
-    return LINK.sub(sub, n.body)
+    out, last = [], 0
+    for m in _links(n.body):
+        out.append(n.body[last:m.start()])
+        out.append(sub(m))
+        last = m.end()
+    out.append(n.body[last:])
+    return "".join(out)
 
 
 def summary(p: Plan, dry_run: bool) -> dict:
@@ -415,8 +433,8 @@ def apply(s: Session, actor: Actor, p: Plan, store, max_bytes: int,
     goes, so a caller whose transaction fails can remove them."""
     uploaded = [] if uploaded is None else uploaded
     d = p.domain
-    existing = {a.id for a in s.scalars(
-        select(Attachment.id).join(Document).where(Document.domain_id == d.id))}
+    existing = set(s.scalars(
+        select(Attachment.id).join(Document).where(Document.domain_id == d.id)))
     page_ids = {n.path: (n.doc.id if n.doc else n.new_id) for n in p.nodes
                 if n.path and n.action != "skip"}
     by_key = {n.key: n for n in p.nodes}

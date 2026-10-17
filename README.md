@@ -10,8 +10,8 @@ agents over an OAuth MCP server, so web chats and local agents read and write th
 owner keeps a closed taxonomy of domains that agents can use but not change; documents carry
 attributed revision history with diffs, named versions and a trash.
 
-Status: **0.7.0** at https://webdoc.danwils.com (phases 1-5, viewers and reports, page tree and
-attachments). Domains (personal and public) holding a page tree (any page can have child pages), file
+Status: **0.8.0** at https://webdoc.danwils.com (phases 1-5, viewers and reports, page tree and
+attachments, archive import and a sync tool). Domains (personal and public) holding a page tree (any page can have child pages), file
 attachments, tags, reader/editor/moderator grants with admins from an authentik group, signed-out
 reading of public domains, notes and documents with a Toast UI markdown editor, section-level
 edits for agents, history (who and through which app, diffs, named versions, restore), trash,
@@ -30,11 +30,30 @@ Design and roadmap: [`docs/design.md`](docs/design.md).
 On first use the client opens a browser to sign in (authentik) and **Allow** it. Clients that can't
 do that use a personal access token from **Agents**, sent as `Authorization: Bearer wdp_…`.
 
+## Sync a folder
+
+`cli/webdoc_sync.py` keeps a local folder of markdown in step with a domain (or one page and
+everything below it). Standard library only, Python 3.9+; it uses a personal access token from
+**Agents** in `WEBDOC_TOKEN` (or `~/.config/webdoc/token`).
+
+```
+python3 cli/webdoc_sync.py pull <domain-url-or-id> <dir> --server https://webdoc.danwils.com [--under <page>]
+python3 cli/webdoc_sync.py status <dir>
+python3 cli/webdoc_sync.py push <dir> [--dry-run] [--delete] [--force]
+python3 cli/webdoc_sync.py pull <dir>
+```
+
+push sends only what changed since the last pull or push; a page changed on the server meanwhile
+is reported as a conflict and not written. Deleting a file trashes its page only with `--delete`.
+The web UI's **Import** (domain page, or **Import here** on a page) takes the same format, or any
+zip/tar of markdown.
+
 ## Layout
 
 - `api/` — FastAPI (`webdoc/`), SQLAlchemy + Alembic on Postgres (SQLite locally).
   `access.py` every permission decision, `domains.py` domains/grants, `documents.py`
-  documents and their history, `tree.py` the page tree, `attachments.py` + `storage.py` files, `sections.py` markdown section edits, `activity.py` the event log,
+  documents and their history, `tree.py` the page tree, `attachments.py` + `storage.py` files,
+  `importer.py` archive import, `sections.py` markdown section edits, `activity.py` the event log,
   `export.py` markdown export, `templates.py` document types, `proposals.py` the proposal
   queue, `mcp_server.py` the MCP tools. Sign-in (`oidc.py`, `auth.py`), MCP
   OAuth (`oauth.py`) and tokens (`tokens.py`) are copied from nodewright.

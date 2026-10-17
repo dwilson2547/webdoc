@@ -389,9 +389,14 @@ Phases, each a release with a review pause:
    drag-to-move (muteable confirmation), parent picker, subtree trash/restore/purge, attachments in
    AIStor with editor image upload, tree-shaped export with files, MCP `list_tree` / `parent` /
    `under`.
-2. **Archive import** of the export format (zip/tar of `.md` with frontmatter + `_attachments/`), so
-   export → import round-trips; then a local sync CLI pulling/pushing a domain or subtree as a
-   folder, using `base_revision` to detect conflicts.
+2. ✅ 0.8.0 **Archive import + sync tool** (`importer.py`, `cli/webdoc_sync.py`): export → import
+   round-trips by `webdoc_id`; generic markdown folders import with folders as parent pages and
+   linked files as attachments; dry-run preview in the UI. The sync tool pulls a domain or subtree,
+   pushes only changed files with `.webdoc/push.json` (changed paths, revision checks, pages to
+   trash), and reports conflicts instead of writing them. Personal access / OAuth tokens work on
+   export, manifest and import only.
+   📐 Later (user, 2026-10-17): a separate sync-token kind scoped to chosen domains, instead of
+   the one token per user.
 3. **Private forums and per-forum roles**: a forum is a contribution-enabled domain that is public
    or private (named members); roles per forum are view / add / moderate / admin. No orgs or
    groups above the domain (§14 phase 6 stays dropped).

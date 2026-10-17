@@ -2,7 +2,7 @@ image:
   repository: dwilson2547/webdoc
   # A release from CHANGELOG.md. Bumping this is how a release reaches the
   # cluster; :latest is pushed too, but the chart doesn't follow it.
-  tag: "0.7.0"
+  tag: "0.8.0"
   pullPolicy: IfNotPresent
 
 # Public (Traefik pubsecure, letsencrypt-prod, external-dns). Public domains are
