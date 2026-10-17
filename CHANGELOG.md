@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.7.0 — 2026-10-17
+
+Page tree and attachments: the first phase of bringing dan-wiki's wiki features into webdoc
+(design §16).
+
+- Documents form a tree inside their domain: any page can hold child pages, so a folder is just a
+  page with children. A sidebar on domain and document pages shows the tree; drag a page onto
+  another to put it underneath, or onto a row's top or bottom edge to reorder. Moving under a new
+  parent asks first, and the question can be muted for 1-60 minutes or for good (per browser).
+  Breadcrumbs follow the tree, a page lists its child pages, and "New page here" files under it.
+- **Projects are gone.** Migration 0007 turns each project into a top-level page (its description
+  becomes the body) and moves the project's documents under it. Downgrading restores the schema
+  only.
+- Trashing a page trashes everything below it; restoring brings back what went with it. A page
+  restored while its parent is still in the trash returns under the nearest live ancestor.
+  Moving a page to another domain takes its child pages along.
+- Attachments: files on a document, stored in AIStor (S3) like nodewright's. Images pasted, dropped
+  or picked in the editor upload and are linked in place; other files attach from the page's
+  Attachments panel. Only real raster images display inline; everything else downloads. Readers of
+  the document (and its share links) can open its files. Purging a page deletes its files.
+  Chart: `attachments.s3Endpoint` (empty = off), bucket `webdoc`, secret `webdoc-bucket-credentials`.
+- Export lays the domain out as its tree (`Page.md` beside a `Page/` folder of its children) and
+  includes attachments under `_attachments/`, with links rewritten to relative paths.
+- MCP: `create_project` is replaced by `list_tree`; `project` arguments become `parent` (create and
+  update, an id or a title path such as `Infra/k8s`; `to_top` replaces `no_project`) and `under`
+  (list_documents, search, find: a page and everything below it). `list_domains` lists each domain's
+  top-level pages; `get_document` adds `child_pages` and `attachments`.
+
 ## 0.6.0 — 2026-10-12
 
 Viewers by default, and reports on personal documents (the two items deferred from 0.2.0).

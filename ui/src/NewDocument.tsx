@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { api, errText, type DomainDetail, type Kind, type TemplateSpec } from "./api";
 import { MarkdownEditor, type EditorHandle } from "./markdown";
+import { ParentPicker, usePageTree } from "./PageTree";
 import { Link, navigate } from "./router";
 import { FieldsEditor, GuidancePanel } from "./TemplateParts";
 import { parseTags } from "./util";
@@ -16,7 +17,8 @@ export function NewDocument({ search }: { search: string }) {
   const [title, setTitle] = useState("");
   const [tags, setTags] = useState("");
   const [fields, setFields] = useState<Record<string, string>>({});
-  const [project, setProject] = useState(params.get("project") || "");
+  const [parent, setParent] = useState<string | null>(params.get("parent") || null);
+  const tree = usePageTree(domainId);
   const [error, setError] = useState<string | null>(null);
   const editor = useRef<EditorHandle>(null);
   useEffect(() => {
@@ -45,7 +47,7 @@ export function NewDocument({ search }: { search: string }) {
     try {
       const d = await api.createDocument({
         domain_id: domainId, kind, title: title.trim(), body: editor.current!.getMarkdown(),
-        tags: parseTags(tags), project_id: kind === "contribution" ? null : project || null, type: spec ? spec.type : null, fields,
+        tags: parseTags(tags), parent_id: kind === "contribution" ? null : parent, type: spec ? spec.type : null, fields,
       });
       navigate(`/d/${d.id}`);
     } catch (e) {
@@ -75,11 +77,8 @@ export function NewDocument({ search }: { search: string }) {
                 </select>
               </label>
             )}
-            {kind !== "contribution" && <label>Project
-              <select value={project} onChange={(e) => setProject(e.target.value)}>
-                <option value="">None</option>
-                {domain.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
+            {kind !== "contribution" && tree.pages && <label>Under
+              <ParentPicker pages={tree.pages} value={parent} onChange={setParent} />
             </label>}
             <label className="grow">Tags <input value={tags} placeholder="comma, separated" onChange={(e) => setTags(e.target.value)} /></label>
           </div>
@@ -88,7 +87,8 @@ export function NewDocument({ search }: { search: string }) {
               it's then public to everyone, so leave out hostnames, addresses, internal paths, project names and secrets.</p>
           )}
           {spec && <FieldsEditor defs={spec.fields} values={fields} onChange={setFields} />}
-          {ready ? <MarkdownEditor key={spec?.type ?? ""} ref={editor} initial={spec?.starter ?? ""} /> : <p className="muted">Loading…</p>}
+          {ready ? <MarkdownEditor key={spec?.type ?? ""} ref={editor} initial={spec?.starter ?? ""}
+            onUploadError={(m) => setError(m)} /> : <p className="muted">Loading…</p>}
           {error && <p className="error">{error}</p>}
           <div className="row">
             <button className="primary" disabled={!title.trim()} onClick={() => void create()}>{kind === "contribution" ? "Save draft" : "Create"}</button>

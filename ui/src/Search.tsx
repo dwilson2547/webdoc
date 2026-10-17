@@ -40,7 +40,7 @@ function Meta({ h }: { h: HitMeta }) {
     <div className="doc-meta muted">
       <span className={"src src-" + h.source}>{SOURCE_TEXT[h.source]}{h.source === "shared" && h.owner && ` · ${h.owner}`}</span>
       <Link to={`/domain/${h.domain_id}`}>{h.domain}</Link>
-      {h.project && <span>› {h.project}</span>}
+      {h.path.includes("/") && <span>› {h.path.split("/").slice(0, -1).join(" / ")}</span>}
       <span className={"kind k-" + h.kind}>{h.type || h.kind}</span>
       {h.tags.map((t) => <span key={t} className="tag small">{t}</span>)}
       <span>{ago(h.updated_at)}</span>

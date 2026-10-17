@@ -62,7 +62,7 @@ h1 { margin: 4px 0; font-size: 26px; }
 .card-meta { font-size: 12px; }
 
 .domain-desc { margin: 0 0 12px; }
-.domain-body { display: grid; grid-template-columns: 200px 1fr; gap: 24px; }
+.domain-body { display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 24px; }
 .filters h4 { margin: 14px 0 4px; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: .04em; }
 .filters h4:first-child { margin-top: 0; }
 .docs { list-style: none; padding: 0; margin: 12px 0; }
@@ -201,3 +201,60 @@ button.flat-btn:hover { color: var(--danger); }
 .scan-list { margin: 4px 0 10px; padding-left: 18px; font-size: 14px; }
 .scan-list code { background: var(--bg); padding: 0 4px; border-radius: 3px; }
 blockquote { border-left: 3px solid var(--border); margin: 4px 0; padding-left: 10px; }
+
+/* Page tree (PageTree.tsx) */
+.page-tree ul { list-style: none; margin: 0; padding: 0; }
+.page-tree ul ul { padding-left: 14px; }
+.tree-row { display: flex; align-items: center; gap: 2px; border-radius: 6px; padding: 1px 2px; font-size: 14px; position: relative; }
+.tree-row:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.tree-row.current { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.tree-row.current .tree-link { font-weight: 600; }
+.tree-row.dragging { opacity: .4; }
+.tree-row.drop-inside { box-shadow: inset 0 0 0 2px var(--accent); }
+.tree-row.drop-before { box-shadow: inset 0 2px 0 var(--accent); }
+.tree-row.drop-after { box-shadow: inset 0 -2px 0 var(--accent); }
+.tree-toggle { width: 18px; flex: none; border: none; background: none; padding: 0; color: var(--muted); font-size: 12px; line-height: 1; text-align: center; }
+.tree-link { flex: 1; min-width: 0; color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 2px 0; }
+.tree-note { color: var(--muted); margin-right: 4px; font-size: 12px; }
+.tree-add { border: none; background: none; padding: 0 6px; color: var(--muted); visibility: hidden; }
+.tree-row:hover .tree-add { visibility: visible; }
+.tree-add:hover { color: var(--accent); }
+.tree-empty { font-size: 13px; margin: 4px 0; }
+.tree-root-drop { margin-top: 6px; border: 1px dashed var(--border); border-radius: 6px; padding: 6px; font-size: 12px; color: var(--muted); text-align: center; }
+.tree-root-drop.on { border-color: var(--accent); color: var(--accent); }
+.page-tree .badge { margin-left: 2px; font-size: 10px; }
+
+/* Wiki layout: tree | page | history or guidance */
+.doc-page.wiki { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 20px; max-width: 1500px; }
+.doc-page.wiki.with-side { grid-template-columns: 250px minmax(0, 1fr) 420px; max-width: 1900px; }
+.tree-side { align-self: start; position: sticky; top: 60px; max-height: calc(100vh - 80px); overflow: auto; }
+.tree-side summary { font-weight: 600; margin-bottom: 6px; cursor: pointer; }
+.tree-side summary a { color: var(--fg); }
+@media (max-width: 1100px) {
+  .doc-page.wiki.with-side { grid-template-columns: 220px minmax(0, 1fr); }
+  .doc-page.wiki.with-side > .history, .doc-page.wiki.with-side > .guidance { grid-column: 1 / -1; position: static; max-height: none; }
+}
+@media (max-width: 760px) {
+  .doc-page.wiki, .doc-page.wiki.with-side { grid-template-columns: 1fr; }
+  .tree-side { position: static; max-height: none; }
+  .tree-side details:not([open]) { margin-bottom: 0; }
+}
+
+.child-pages { margin-top: 18px; }
+.child-pages h3, .attachments h3 { font-size: 15px; margin: 0; }
+.child-pages ul { margin: 6px 0; padding-left: 20px; }
+.attachments { margin-top: 18px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 8px 14px; }
+.attachments ul { list-style: none; padding: 0; margin: 6px 0 0; }
+.attachments li { padding: 4px 0; border-top: 1px solid var(--border); font-size: 14px; }
+.attachments li button { padding: 1px 8px; font-size: 13px; }
+.att-thumb { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; border: 1px solid var(--border); }
+
+/* Parent picker (PageTree.tsx) */
+.parent-picker { position: relative; }
+.parent-current { max-width: 360px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.parent-list { position: absolute; z-index: 10; top: calc(100% + 4px); left: 0; width: 360px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 24px #0003; padding: 6px; }
+.parent-list input { width: 100%; }
+.parent-list ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 300px; overflow: auto; }
+.parent-list li { padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.parent-list li:hover { background: var(--bg); }
+.parent-list li.on { color: var(--accent); font-weight: 600; }

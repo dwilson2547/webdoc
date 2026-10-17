@@ -47,7 +47,10 @@ const qs = (o: Record<string, string | number | boolean | null | undefined>) => 
 };
 
 export type Me = { id: string; username: string; is_admin: boolean; is_editor: boolean };
-export type Config = { oidc: boolean; dev_login: boolean; version: string; max_document_bytes: number };
+export type Config = {
+  oidc: boolean; dev_login: boolean; version: string; max_document_bytes: number;
+  attachments: boolean; max_attachment_bytes: number;
+};
 export type Role = "admin" | "owner" | "moderator" | "editor" | "reader";
 export type Scope = "public" | "personal";
 export type Domain = {
@@ -55,16 +58,15 @@ export type Domain = {
   role: Role | null; documents: number; last_activity: string;
   accepts_contributions: boolean; contribution_types: string[]; can_contribute: boolean;
 };
-export type Project = { id: string; domain_id: string; slug: string; name: string; description: string };
 export type DomainDetail = Domain & {
-  projects: Project[]; can: string[]; assignable: Role[]; tags: string[]; contribution_type_names: Record<string, string>;
+  can: string[]; assignable: Role[]; tags: string[]; contribution_type_names: Record<string, string>;
 };
 export type Home = { public: Domain[]; personal: Domain[]; shared: Domain[] };
 export type Kind = "note" | "document" | "contribution";
 export type DocStatus = "published" | "draft" | "hidden";
 export type DocMeta = {
-  id: string; kind: Kind; title: string; type: string | null; fields: Record<string, string>; domain_id: string; domain: string; project_id: string | null;
-  project: string | null; tags: string[]; revision: number; created_at: string; updated_at: string;
+  id: string; kind: Kind; title: string; type: string | null; fields: Record<string, string>; domain_id: string; domain: string;
+  parent_id: string | null; position: number; path: { id: string; title: string }[]; tags: string[]; revision: number; created_at: string; updated_at: string;
   deleted_at: string | null; status: DocStatus;
 };
 export type ScanFinding = { kind: string; line: number; excerpt: string };
@@ -109,6 +111,17 @@ export type Doc = DocMeta & {
   body: string; role: Role | null; can_edit: boolean; can_delete: boolean; can_purge: boolean; domain_scope: Scope;
   lease: Lease | null; can_share: boolean; contribution?: Thread; can_report: boolean; hidden_reason: string | null;
   template?: (TemplateSpec & { check: TemplateCheck }) | null;
+  children: { id: string; title: string; kind: Kind; type: string | null; updated_at: string }[];
+  attachments: Attachment[];
+};
+export type Attachment = {
+  id: string; document_id: string; name: string; content_type: string; size: number; image: boolean;
+  url: string; markdown: string; by: string | null; created_at: string;
+};
+/** A page in a domain's tree, depth first (api/webdoc/tree.py flat). */
+export type TreePage = {
+  id: string; title: string; kind: Kind; type: string | null; parent_id: string | null; position: number;
+  depth: number; status: DocStatus; updated_at: string;
 };
 export type Lease = {
   holder: string; kind: "ui" | "agent"; user_id: string; label: string; expires_at: string; seconds_left: number; message: string;
@@ -140,7 +153,7 @@ export type Guide = { text: string; is_default: boolean };
 export type Source = "public" | "personal" | "shared";
 export type HitMeta = {
   id: string; title: string; kind: Kind; type: string | null; domain_id: string; domain: string; source: Source;
-  owner: string | null; project_id: string | null; project: string | null; tags: string[]; updated_at: string;
+  owner: string | null; parent_id: string | null; path: string; tags: string[]; updated_at: string;
 };
 export type SearchHit = HitMeta & { heading: string; snippet: string; matched: ("semantic" | "keyword" | "title")[]; score: number };
 export type FindMatch = { line: number; heading: string; text: string; in: "title" | "body" };
@@ -173,15 +186,28 @@ export const api = {
   grants: (id: string) => call<{ grants: Grant[]; assignable: Role[]; owner: string | null }>("GET", `/api/domains/${id}/grants`),
   setGrant: (id: string, username: string, role: Role) => call<Grant>("PUT", `/api/domains/${id}/grants`, { username, role }),
   removeGrant: (id: string, userId: string) => call("DELETE", `/api/domains/${id}/grants/${userId}`),
-  createProject: (domainId: string, name: string) => call<Project>("POST", `/api/domains/${domainId}/projects`, { name }),
-  renameProject: (id: string, name: string) => call<Project>("PATCH", `/api/projects/${id}`, { name }),
-  deleteProject: (id: string) => call("DELETE", `/api/projects/${id}`),
-  documents: (f: { domain?: string; project?: string; kind?: string; tag?: string; q?: string; trashed?: boolean; limit?: number; offset?: number }) =>
+  tree: (domainId: string) => call<{ pages: TreePage[] }>("GET", `/api/domains/${domainId}/tree`).then((r) => r.pages),
+  move: (id: string, parent_id: string | null, position: number | null = null) =>
+    call<Doc>("POST", `/api/documents/${id}/move`, { parent_id, position }),
+  attachments: (id: string) =>
+    call<{ attachments: Attachment[] }>("GET", `/api/documents/${id}/attachments`).then((r) => r.attachments),
+  upload: async (docId: string, file: Blob, name: string): Promise<Attachment> => {
+    const r = await fetch(`/api/documents/${docId}/attachments`, {
+      method: "POST", credentials: "same-origin", body: file,
+      headers: { "X-Webdoc": "1", "X-Webdoc-Tab": TAB_ID, "X-Filename": encodeURIComponent(name),
+        "Content-Type": file.type || "application/octet-stream" },
+    });
+    const data = await r.json().catch(() => null);
+    if (!r.ok) throw new ApiError(r.status, data);
+    return data as Attachment;
+  },
+  deleteAttachment: (id: string) => call("DELETE", `/api/attachments/${id}`),
+  documents: (f: { domain?: string; under?: string; kind?: string; tag?: string; q?: string; trashed?: boolean; limit?: number; offset?: number }) =>
     call<{ total: number; documents: DocMeta[] }>("GET", "/api/documents" + qs(f)),
-  createDocument: (body: { domain_id: string; kind: Kind; title: string; body: string; tags: string[]; project_id: string | null; type?: string | null; fields?: Record<string, string> }) =>
+  createDocument: (body: { domain_id: string; kind: Kind; title: string; body: string; tags: string[]; parent_id: string | null; type?: string | null; fields?: Record<string, string> }) =>
     call<Doc>("POST", "/api/documents", body),
   document: (id: string) => call<Doc>("GET", `/api/documents/${id}`),
-  saveDocument: (id: string, body: { base_revision: number; title?: string; body?: string; tags?: string[]; fields?: Record<string, string | null>; project_id?: string | null; domain_id?: string; ack_warnings?: boolean }) =>
+  saveDocument: (id: string, body: { base_revision: number; title?: string; body?: string; tags?: string[]; fields?: Record<string, string | null>; parent_id?: string | null; domain_id?: string; ack_warnings?: boolean }) =>
     call<Doc>("PUT", `/api/documents/${id}`, body),
   trash: (id: string) => call("DELETE", `/api/documents/${id}`),
   untrash: (id: string) => call<Doc>("POST", `/api/documents/${id}/restore`),
@@ -255,3 +281,7 @@ export const api = {
 };
 
 export const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+let configOnce: Promise<Config> | null = null;
+/** The server's settings, fetched once per page load. */
+export const getConfig = () => (configOnce ??= api.config());

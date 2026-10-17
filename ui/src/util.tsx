@@ -9,6 +9,12 @@ export function ago(iso: string): string {
   return new Date(iso).toLocaleDateString();
 }
 
+export function size(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
 export const parseTags = (text: string) =>
   text.split(",").map((t) => t.trim()).filter(Boolean);
 

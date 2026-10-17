@@ -69,7 +69,8 @@ export function SharedPage({ token }: { token: string }) {
         <span>updated {ago(doc.updated_at)}</span>
       </div>
       <FieldsView fields={doc.fields} />
-      <MarkdownView markdown={doc.body} />
+      {/* Images and files load through the link, not the reader's (absent) session. */}
+      <MarkdownView markdown={doc.body.replaceAll("/api/attachments/", `/api/s/${encodeURIComponent(token)}/attachments/`)} />
     </div>
   );
 }

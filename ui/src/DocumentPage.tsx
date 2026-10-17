@@ -1,26 +1,37 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ApiError, errText, TAB_ID, type Doc, type DomainDetail, type Lease, type Me } from "./api";
+import { api, ApiError, errText, getConfig, TAB_ID, type Attachment, type Config, type Doc, type Lease, type Me, type TreePage } from "./api";
+import { AttachmentsPanel } from "./Attachments";
 import { useDocEvents } from "./live";
 import { ShareDialog } from "./Share";
 import { ContributionHead, ContributionThread, useScanGate } from "./Contribution";
 import { HistoryPanel } from "./HistoryPanel";
 import { MarkdownEditor, MarkdownView, type EditorHandle } from "./markdown";
+import { PageTree, ParentPicker, usePageTree } from "./PageTree";
 import { Link, navigate } from "./router";
 import { FieldsEditor, FieldsView, GuidancePanel } from "./TemplateParts";
 import { ago, parseTags } from "./util";
 
-function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => void; onCancel: () => void }) {
+function Editing({ doc, pages, config, onSaved, onCancel, onAttachments }: {
+  doc: Doc; pages: TreePage[] | null; config: Config | null; onSaved: (d: Doc) => void; onCancel: () => void;
+  onAttachments: (a: Attachment[]) => void;
+}) {
   const editor = useRef<EditorHandle>(null);
   const [title, setTitle] = useState(doc.title);
   const [tags, setTags] = useState(doc.tags.join(", "));
-  const [project, setProject] = useState(doc.project_id ?? "");
+  const [parent, setParent] = useState<string | null>(doc.parent_id);
   const [fields, setFields] = useState<Record<string, string>>(doc.fields);
-  const [domain, setDomain] = useState<DomainDetail | null>(null);
   const [conflict, setConflict] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const gate = useScanGate();
-  useEffect(() => { api.domain(doc.domain_id).then(setDomain, () => undefined); }, [doc.domain_id]);
+  const uploads = !!config?.attachments;
+  const attachments = useRef(doc.attachments);
+  attachments.current = doc.attachments;
+  const upload = async (file: Blob, name: string) => {
+    const a = await api.upload(doc.id, file, name);
+    onAttachments([a, ...attachments.current]);
+    return a;
+  };
 
   const save = async (base = doc.revision) => {
     setSaving(true);
@@ -30,7 +41,7 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
       await gate.run(async (ack) => onSaved(await api.saveDocument(doc.id, {
         ack_warnings: ack,
         base_revision: base, title: title.trim(), body: editor.current!.getMarkdown(),
-        tags: parseTags(tags), project_id: project || null,
+        tags: parseTags(tags), ...(parent !== doc.parent_id ? { parent_id: parent } : {}),
         // Emptied fields are sent as null, which removes them.
         fields: Object.fromEntries([...new Set([...Object.keys(doc.fields), ...Object.keys(fields)])]
           .map((k) => [k, fields[k]?.trim() ? fields[k].trim() : null])),
@@ -47,11 +58,8 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
     <div className="editing">
       <input className="title-input" value={title} maxLength={300} onChange={(e) => setTitle(e.target.value)} aria-label="Title" />
       <div className="row meta-edit">
-        {doc.kind !== "contribution" && <label>Project
-          <select value={project} onChange={(e) => setProject(e.target.value)}>
-            <option value="">None</option>
-            {domain?.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
+        {doc.kind !== "contribution" && pages && <label>Under
+          <ParentPicker pages={pages} value={parent} exclude={doc.id} onChange={setParent} />
         </label>}
         <label className="grow">Tags <input value={tags} placeholder="comma, separated" onChange={(e) => setTags(e.target.value)} /></label>
       </div>
@@ -59,7 +67,10 @@ function Editing({ doc, onSaved, onCancel }: { doc: Doc; onSaved: (d: Doc) => vo
         <FieldsEditor defs={doc.template?.fields ?? []} values={fields} onChange={setFields}
           missing={doc.template?.check.missing_fields} />
       )}
-      <MarkdownEditor ref={editor} initial={doc.body} />
+      <MarkdownEditor ref={editor} initial={doc.body} onUpload={uploads ? upload : undefined}
+        onUploadError={(m) => setError(m)} />
+      <AttachmentsPanel docId={doc.id} items={doc.attachments} canEdit uploads={uploads}
+        onChange={onAttachments} onInsert={(md) => editor.current?.insert(md)} />
       {conflict !== null && (
         <div className="banner warn">
           Someone saved revision {conflict} while you were editing. Your text is still here.
@@ -90,6 +101,11 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
   const [lease, setLease] = useState<Lease | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [remote, setRemote] = useState<string | null>(null);
+  const [config, setConfig] = useState<Config | null>(null);
+  useEffect(() => { getConfig().then(setConfig, () => undefined); }, []);
+  const [domainId, setDomainId] = useState<string | null>(null);
+  const tree = usePageTree(domainId ?? "");
+  useEffect(() => { if (doc && doc.domain_id !== domainId) setDomainId(doc.domain_id); }, [doc, domainId]);
   const load = () => api.document(id).then((d) => { setDoc(d); setLease(d.lease); }, (e) => setError(errText(e)));
   useEffect(() => { setEditing(false); setRemote(null); setNotice(null); void load(); }, [id]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -162,7 +178,8 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
   const stopEdit = () => setEditing(false);
   const trash = async () => {
     if (!confirm(`Move "${doc.title}" to the trash? It can be restored.`)) return;
-    await api.trash(doc.id).then(() => navigate(`/domain/${doc.domain_id}`), (e) => setError(errText(e)));
+    await api.trash(doc.id).then(() => navigate(doc.parent_id ? `/d/${doc.parent_id}` : `/domain/${doc.domain_id}`),
+      (e) => setError(errText(e)));
   };
   const untrash = async () => setDoc(await api.untrash(doc.id));
   const report = async () => {
@@ -176,11 +193,21 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
   const whoHolds = other && (other.kind === "agent" ? `${other.label.replace(" via token:", " via ")} (an agent)` : other.label);
 
   return (
-    <div className={"page doc-page" + (history || (editing && doc.template) ? " with-side" : "")}>
+    <div className={"page doc-page wiki" + (history || (editing && doc.template) ? " with-side" : "")}>
+      <aside className="tree-side">
+        <details open>
+          <summary><Link to={`/domain/${doc.domain_id}`}>{doc.domain}</Link></summary>
+          {domainId === doc.domain_id && (
+            <PageTree domainId={doc.domain_id} currentId={doc.id} pages={tree.pages} reload={tree.reload}
+              canWrite={!!doc.role && ["admin", "owner", "moderator", "editor"].includes(doc.role)}
+              onMoved={(moved) => { if (moved === doc.id) void load(); }} />
+          )}
+        </details>
+      </aside>
       <div className="doc-main">
         <div className="crumbs">
           <Link to="/">Home</Link> › <Link to={`/domain/${doc.domain_id}`}>{doc.domain}</Link>
-          {doc.project && <> › <span>{doc.project}</span></>}
+          {doc.path.map((p) => <span key={p.id}> › <Link to={`/d/${p.id}`}>{p.title}</Link></span>)}
         </div>
         {doc.deleted_at && (
           <div className="banner warn">
@@ -205,13 +232,17 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
         {notice && !editing && <div className="banner info">{notice}</div>}
         {editing && remote && <div className="banner warn">{remote} Saving will ask before replacing their change.</div>}
         {editing ? (
-          <Editing doc={doc} onCancel={stopEdit} onSaved={(d) => { setDoc(d); stopEdit(); }} />
+          <Editing doc={doc} pages={tree.pages} config={config} onCancel={stopEdit}
+            onAttachments={(a) => setDoc((d) => (d ? { ...d, attachments: a } : d))}
+            onSaved={(d) => { setDoc(d); stopEdit(); void tree.reload(); }} />
         ) : (
           <>
             <div className="row doc-head">
               <h1>{doc.title}</h1>
               <span className="grow" />
               {doc.can_edit && !doc.deleted_at && !other && <button className="primary" onClick={() => void startEdit()}>Edit</button>}
+              {doc.can_edit && !doc.deleted_at && doc.kind !== "contribution" &&
+                <button onClick={() => navigate(`/new?domain=${doc.domain_id}&kind=document&parent=${doc.id}`)}>New page here</button>}
               <button onClick={() => setHistory((h) => !h)}>History</button>
               {doc.can_share && !doc.deleted_at && <button onClick={() => setSharing(true)}>Share</button>}
               {doc.can_report && !doc.contribution && <button className="flat-btn" onClick={() => void report()}>Report</button>}
@@ -233,7 +264,22 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
               </p>
             )}
             <MarkdownView markdown={doc.body} />
+            {doc.children.length > 0 && (
+              <section className="child-pages">
+                <h3>Pages</h3>
+                <ul>
+                  {doc.children.map((c) => (
+                    <li key={c.id}>
+                      <Link to={`/d/${c.id}`}>{c.title}</Link>
+                      <span className="muted"> · {c.type ?? c.kind} · {ago(c.updated_at)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
             {doc.contribution && <ContributionThread doc={doc} onDoc={setDoc} onError={setError} />}
+            <AttachmentsPanel docId={doc.id} items={doc.attachments} uploads={!!config?.attachments}
+              canEdit={doc.can_edit && !doc.deleted_at} onChange={(a) => setDoc({ ...doc, attachments: a })} />
           </>
         )}
       </div>

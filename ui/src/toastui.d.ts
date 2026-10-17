@@ -13,6 +13,8 @@ declare module "@toast-ui/editor" {
     static factory(options: Options & { viewer?: boolean }): Instance;
     getMarkdown(): string;
     setMarkdown(md: string): void;
+    insertText(text: string): void;
+    moveCursorToEnd(focus?: boolean): void;
     focus(): void;
     destroy(): void;
   }

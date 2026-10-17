@@ -31,15 +31,24 @@ import "@toast-ui/editor-plugin-code-syntax-highlight/dist/toastui-editor-plugin
 const dark = () => window.matchMedia?.("(prefers-color-scheme: dark)").matches;
 const plugins = [[codeSyntaxHighlight, { highlighter: Prism }]] as any;
 
-export type EditorHandle = { getMarkdown: () => string; focus: () => void };
+export type EditorHandle = { getMarkdown: () => string; focus: () => void; insert: (md: string) => void };
+/** Stores a pasted, dropped or picked image and says where it is (api.upload). */
+export type Uploader = (file: Blob, name: string) => Promise<{ url: string; name: string }>;
 
 export const MarkdownEditor = forwardRef<EditorHandle, {
-  initial: string; onChange?: (md: string) => void; height?: string;
-}>(function MarkdownEditor({ initial, onChange, height = "calc(100vh - 230px)" }, ref) {
+  initial: string; onChange?: (md: string) => void; height?: string; onUpload?: Uploader;
+  onUploadError?: (message: string) => void;
+}>(function MarkdownEditor({ initial, onChange, height = "calc(100vh - 230px)", onUpload, onUploadError }, ref) {
   const host = useRef<HTMLDivElement>(null);
   const ed = useRef<Editor | null>(null);
   const change = useRef(onChange);
   change.current = onChange;
+  const upload = useRef(onUpload);
+  upload.current = onUpload;
+  const uploadError = useRef(onUploadError);
+  uploadError.current = onUploadError;
+  // Until someone has put the cursor somewhere, inserted links go at the end.
+  const touched = useRef(false);
 
   useEffect(() => {
     // Toast UI gets an element of its own inside the one React renders: its
@@ -59,11 +68,24 @@ export const MarkdownEditor = forwardRef<EditorHandle, {
         ["heading", "bold", "italic", "strike"],
         ["hr", "quote"],
         ["ul", "ol", "task", "indent", "outdent"],
-        ["table", "link"],
+        onUpload ? ["table", "image", "link"] : ["table", "link"],
         ["code", "codeblock"],
         ["scrollSync"],
       ],
-      events: { change: () => change.current?.(e.getMarkdown()) },
+      events: { change: () => change.current?.(e.getMarkdown()), focus: () => { touched.current = true; } },
+      // Pasted, dropped and picked images become attachments of the document.
+      hooks: {
+        addImageBlobHook: (blob: Blob | File, callback: (url: string, alt: string) => void) => {
+          const up = upload.current;
+          if (!up) {
+            uploadError.current?.("Save the page first, then add images.");
+            return false;
+          }
+          const name = (blob as File).name || `pasted-${new Date().toISOString().replace(/[:.]/g, "-")}.png`;
+          up(blob, name).then((a) => callback(a.url, a.name), (err) => uploadError.current?.(String(err?.message ?? err)));
+          return false;
+        },
+      },
     });
     ed.current = e;
     return () => { e.destroy(); el.remove(); ed.current = null; };
@@ -74,6 +96,12 @@ export const MarkdownEditor = forwardRef<EditorHandle, {
   useImperativeHandle(ref, () => ({
     getMarkdown: () => ed.current?.getMarkdown() ?? "",
     focus: () => ed.current?.focus(),
+    insert: (md: string) => {
+      const e = ed.current;
+      if (!e) return;
+      if (!touched.current) e.moveCursorToEnd();
+      e.insertText(`\n${md}\n`);
+    },
   }), []);
 
   return <div ref={host} className="md-editor" />;

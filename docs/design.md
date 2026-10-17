@@ -34,7 +34,7 @@ server stays workflow-neutral: it stores, searches, logs and enforces taxonomy a
 Owner (Platform | Org* | User)              * orgs land in a later phase (§14)
  │                Platform owns public domains, Org owns org domains, User owns personal ones
  ├─ Domain        closed taxonomy; visibility private | members | public
- │   ├─ Project   optional, flat, agent-creatable
+ │   ├─ page tree any document can hold child pages (0.7.0, §16; projects folded in)
  │   └─ allowed document types (by template)
  ├─ Template      a document type: skeleton + section guidance + required fields
  └─ Document      kind note | document | contribution
@@ -47,8 +47,11 @@ Event   append-only activity log (actor, client, action, target, summary, time)
 Chunk   heading-scoped text + embedding + tsvector, for search
 ```
 
-- **No folders.** Domain (required, closed) + project (optional, flat) + tags (open) + saved views
-  replace them. `[[links]]` between documents with backlinks give the cross-references folders can't.
+- **Page tree** ✅ 0.7.0 (`tree.py`): documents nest inside their domain (`parent_id`,
+  `position`); a "folder" is a page with children. This replaced the original "no folders" rule
+  and the flat projects (migration 0007 turned each project into a top-level page). Domain (closed)
+  stays the classification and permission unit; tags stay open. `[[links]]` with backlinks are
+  still planned (§16).
 - **Notes vs documents**: one table, `kind` column. Notes are atomic and untemplated; documents are
   templated, sectioned, long-lived; contributions are documents in a domain that accepts outside
   contributions.
@@ -66,7 +69,7 @@ signed-out visitors can read public domains (below). Four roles:
 |---|---|---|
 | **admin** | platform | Everything: create/edit public domains and their templates, grant any role, moderate anything, approve proposals for public domains. |
 | **moderator** | one org, or one public domain | Admin *within that scope*. Org: manage org members and their roles, org domains and templates, approve org proposals, hide/lock/merge org content. Public domain: grant editor on it, manage its templates, hide/lock/merge its content (creating or deleting public domains stays admin-only). |
-| **editor** | org, or a shared domain | Create and edit documents and notes; create projects and tags. |
+| **editor** | org, or a shared domain | Create and edit documents and notes, arrange the page tree, add tags and attachments. |
 | **reader** | org, or a shared domain | Read and search only. |
 
 - **Personal domains**: the owning user has full control over them and may share a domain with other
@@ -265,9 +268,9 @@ Built in 0.3.0 ✅: `search`, `find`, `whats_new` (excludes the calling app's ow
 
 | Area | Tools (full plan) |
 |---|---|
-| Orient | `list_domains`, `list_templates`, `get_template`, `get_writing_guide` |
+| Orient | `list_domains`, `list_tree` (0.7.0, replaces `create_project`), `list_templates`, `get_template`, `get_writing_guide` |
 | Read | `search` (semantic), `find` (literal), `get_document` (optionally one section), `list_documents` (filters), `get_backlinks` |
-| Write | `create_document`, `create_note`, `edit_document` (ops, §7), `update_document`, `create_project`, `delete_document` (to trash), `restore_document`, `lock_document`, `unlock_document` |
+| Write | `create_document`, `create_note` (both take `parent`), `edit_document` (ops, §7), `update_document` (moves with `parent` / `to_top`), `delete_document` (to trash, with the pages below), `restore_document`, `lock_document`, `unlock_document` |
 | History | `list_versions`, `get_version`, `diff_versions`, `save_version`, `restore_version`, `whats_new` |
 | Governance | `propose_domain`, `propose_domain_change`, `propose_template` |
 | Contributions | `search` with `scope=public`, `draft_contribution`, `reply`, `confirm` |
@@ -279,7 +282,7 @@ avoid duplicates.
 
 - **Home** has three sections, in this order: **Public** domains, **Org** domains (one group per org
   the user belongs to), **Personal** domains. Each domain card shows its description, document
-  count and last activity; opening a domain lists its projects, documents and notes.
+  count and last activity; opening a domain shows its page tree beside its documents and notes.
 - **Central search**, always in the header, queries every source the user can read. Results show
   source (public / org name / personal), domain, project, type and a matched snippet.
   - Mode toggle: **Semantic** (default) or **Find** (literal, §8).
@@ -373,3 +376,52 @@ can be extracted later once both copies have settled):
 - Should a public contribution keep a link back to a private source document, visible only to the
   author?
 - Does an org domain inherit templates from the org, or only from itself?
+
+## 16. Folding dan-wiki into webdoc 📐 (decided 2026-10-17)
+
+dan-wiki (`ai/dan-wiki`) was the user-facing wiki; webdoc was the agent-facing store. They merge
+into webdoc, keeping the name. dan-wiki holds nothing worth migrating, so it is retired once its
+features land here rather than imported.
+
+Phases, each a release with a review pause:
+
+1. ✅ 0.7.0 **Page tree + attachments**: nested pages replacing projects, tree sidebar with
+   drag-to-move (muteable confirmation), parent picker, subtree trash/restore/purge, attachments in
+   AIStor with editor image upload, tree-shaped export with files, MCP `list_tree` / `parent` /
+   `under`.
+2. **Archive import** of the export format (zip/tar of `.md` with frontmatter + `_attachments/`), so
+   export → import round-trips; then a local sync CLI pulling/pushing a domain or subtree as a
+   folder, using `base_revision` to detect conflicts.
+3. **Private forums and per-forum roles**: a forum is a contribution-enabled domain that is public
+   or private (named members); roles per forum are view / add / moderate / admin. No orgs or
+   groups above the domain (§14 phase 6 stays dropped).
+4. **Posts as shared documents** (replaces §12's contribution documents, drafts and replies):
+   - A person writes a document in their own space and **shares it to a forum**. The post points
+     at a **published revision**, never at the latest edit; publishing an update is an explicit
+     action that reruns the secret scan. Readers see only published revisions of that one
+     document: not its domain, path, siblings or the edits between publishes.
+   - Replies are **text comments** for discussion, which may link documents. A comment records the
+     post revision it was made on and shows "on vN" once the post moves on. A linked document the
+     reader can't open stays a plain link (no automatic sharing).
+   - Moderators act on the post (hide, lock, retitle, retag, mark duplicate), never on the source
+     document. The author can mark a comment as the accepted answer.
+   - Withdrawing hides the post; its published snapshots stay for moderators.
+   - Sharing and publishing are human actions in the browser; agents only write into the
+     person's own space (the §12 gate holds).
+   - Existing contribution rows are dropped when posts land unless prod has some worth keeping
+     (check first).
+5. **Typed template fields** (text, choice, multi-select, boolean, number; required flag), a
+   form-based template builder for moderators and a form-style contribution editor. Not a
+   general templating language.
+6. **Git mirrors (read-only)**: a domain mirrors a repo path (pull on a timer or webhook); its pages
+   are read-only here with an "edit in repo" link, searchable over MCP. Opt-in per repo, personal
+   and private by default, never public; nothing under the workspace's private tree is mirrorable.
+   Then an optional one-way git **backup** of wiki-native domains (the export format, committed on
+   a schedule). No two-way sync.
+7. **nodewright embeds** (canvases by reference, rendered through nodewright's render path or a
+   share link) and **filing uploads by rules** (user rules first, then embedding similarity to
+   existing pages, falling back to a proposal).
+
+Also carried over from dan-wiki's backlog: `@user` / `#page` autocomplete and `[[links]]` with
+backlinks (fit with phase 2 or 3).
+

@@ -2,5 +2,5 @@ apiVersion: v2
 name: webdoc
 description: Shared notes and documents with an OAuth MCP server, signed in through authentik
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.3.0
+appVersion: "0.7.0"

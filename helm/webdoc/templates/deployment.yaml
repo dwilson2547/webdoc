@@ -51,6 +51,26 @@ spec:
               value: {{ .Values.oidc.adminGroup | quote }}
             - name: EDITOR_GROUP
               value: {{ .Values.oidc.editorGroup | default "" | quote }}
+            {{- with .Values.attachments }}
+            {{- if .s3Endpoint }}
+            - name: S3_ENDPOINT
+              value: {{ .s3Endpoint | quote }}
+            - name: S3_BUCKET
+              value: {{ .bucket | quote }}
+            - name: MAX_ATTACHMENT_BYTES
+              value: {{ .maxBytes | int64 | quote }}
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: S3_ACCESS_KEY
+            - name: S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .secretName }}
+                  key: S3_SECRET_KEY
+            {{- end }}
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -10,8 +10,9 @@ agents over an OAuth MCP server, so web chats and local agents read and write th
 owner keeps a closed taxonomy of domains that agents can use but not change; documents carry
 attributed revision history with diffs, named versions and a trash.
 
-Status: **0.6.0** at https://webdoc.danwils.com (phases 1-5, viewers and reports). Domains (personal and public),
-projects, tags, reader/editor/moderator grants with admins from an authentik group, signed-out
+Status: **0.7.0** at https://webdoc.danwils.com (phases 1-5, viewers and reports, page tree and
+attachments). Domains (personal and public) holding a page tree (any page can have child pages), file
+attachments, tags, reader/editor/moderator grants with admins from an authentik group, signed-out
 reading of public domains, notes and documents with a Toast UI markdown editor, section-level
 edits for agents, history (who and through which app, diffs, named versions, restore), trash,
 markdown export, document types with per-section guidance, and a proposal queue through which
@@ -32,8 +33,8 @@ do that use a personal access token from **Agents**, sent as `Authorization: Bea
 ## Layout
 
 - `api/` — FastAPI (`webdoc/`), SQLAlchemy + Alembic on Postgres (SQLite locally).
-  `access.py` every permission decision, `domains.py` domains/projects/grants, `documents.py`
-  documents and their history, `sections.py` markdown section edits, `activity.py` the event log,
+  `access.py` every permission decision, `domains.py` domains/grants, `documents.py`
+  documents and their history, `tree.py` the page tree, `attachments.py` + `storage.py` files, `sections.py` markdown section edits, `activity.py` the event log,
   `export.py` markdown export, `templates.py` document types, `proposals.py` the proposal
   queue, `mcp_server.py` the MCP tools. Sign-in (`oidc.py`, `auth.py`), MCP
   OAuth (`oauth.py`) and tokens (`tokens.py`) are copied from nodewright.

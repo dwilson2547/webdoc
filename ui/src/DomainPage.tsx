@@ -2,10 +2,11 @@ import { useCallback, useEffect, useState } from "react";
 import { api, errText, type DocMeta, type DomainDetail, type Kind, type Me } from "./api";
 import { ActivityList } from "./Activity";
 import { DomainSettings } from "./DomainSettings";
+import { PageTree, usePageTree } from "./PageTree";
 import { Link, navigate } from "./router";
 import { ROLE_TEXT, ago } from "./util";
 
-type Filters = { project?: string; kind?: Kind; tag?: string; q?: string; trashed?: boolean };
+type Filters = { kind?: Kind; tag?: string; q?: string; trashed?: boolean };
 const PAGE = 50;
 
 export function DomainPage({ id, me }: { id: string; me: Me | null }) {
@@ -16,8 +17,8 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
   const [q, setQ] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState(false);
-  const [newProject, setNewProject] = useState<string | null>(null);
   const [tab, setTab] = useState<"docs" | "activity">("docs");
+  const tree = usePageTree(id);
 
   const loadDomain = useCallback(() => api.domain(id).then(setD, (e) => setError(errText(e))), [id]);
   const loadDocs = useCallback((more = false) =>
@@ -36,26 +37,17 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
   const canDelete = d.can.includes("delete");
   const set = (patch: Filters) => setF((prev) => ({ ...prev, ...patch }));
 
-  const addProject = async () => {
-    const name = (newProject || "").trim();
-    if (!name) return setNewProject(null);
-    try {
-      await api.createProject(d.id, name);
-      setNewProject(null);
-      await loadDomain();
-    } catch (e) {
-      setError(errText(e));
-    }
+  const restore = async (doc: DocMeta) => {
+    await api.untrash(doc.id).catch((e) => setError(errText(e)));
+    void loadDocs();
+    void tree.reload();
   };
-
-  const restore = async (doc: DocMeta) => { await api.untrash(doc.id).catch((e) => setError(errText(e))); void loadDocs(); };
   const purge = async (doc: DocMeta) => {
-    if (!confirm(`Permanently delete "${doc.title}" and all its history? This cannot be undone.`)) return;
+    if (!confirm(`Permanently delete "${doc.title}", the pages trashed with it, and all their history? This cannot be undone.`)) return;
     await api.purge(doc.id).catch((e) => setError(errText(e)));
     void loadDocs();
   };
-  const newDoc = (kind: Kind) =>
-    navigate(`/new?domain=${d.id}&kind=${kind}` + (f.project ? `&project=${f.project}` : ""));
+  const newDoc = (kind: Kind) => navigate(`/new?domain=${d.id}&kind=${kind}`);
 
   return (
     <div className="page domain-page">
@@ -74,17 +66,9 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
       {d.description && <p className="muted domain-desc">{d.description}</p>}
       <div className="domain-body">
         <aside className="filters">
-          <h4>Projects</h4>
-          <button className={"flat" + (!f.project ? " on" : "")} onClick={() => set({ project: undefined })}>All</button>
-          {d.projects.map((p) => (
-            <button key={p.id} className={"flat" + (f.project === p.id ? " on" : "")} onClick={() => set({ project: p.id })}>{p.name}</button>
-          ))}
-          {canWrite && (newProject === null
-            ? <button className="flat muted" onClick={() => setNewProject("")}>+ Project</button>
-            : <form onSubmit={(e) => { e.preventDefault(); void addProject(); }}>
-                <input autoFocus value={newProject} placeholder="Project name" maxLength={100}
-                  onChange={(e) => setNewProject(e.target.value)} onBlur={() => void addProject()} />
-              </form>)}
+          <h4>Pages</h4>
+          <PageTree domainId={d.id} canWrite={canWrite} pages={tree.pages} reload={tree.reload}
+            onMoved={() => void loadDocs()} />
           <h4>Kind</h4>
           {([undefined, "document", "note", ...(d.accepts_contributions ? ["contribution" as const] : [])] as const).map((k) => (
             <button key={k || "all"} className={"flat" + (f.kind === k ? " on" : "")} onClick={() => set({ kind: k })}>
@@ -130,7 +114,7 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
                   </> : <span className="muted">{ago(doc.updated_at)}</span>}
                 </div>
                 <div className="doc-meta muted">
-                  {doc.project && <span>{doc.project}</span>}
+                  {doc.path.length > 0 && <span>{doc.path.map((p) => p.title).join(" / ")}</span>}
                   {doc.tags.map((t) => <span key={t} className="tag small">{t}</span>)}
                 </div>
               </li>
