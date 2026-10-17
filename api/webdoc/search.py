@@ -18,10 +18,10 @@ from datetime import datetime
 from sqlalchemy import cast, func, literal, literal_column, or_, select, text
 from sqlalchemy.orm import Session
 
-from . import access, sections, tags as tagmod
+from . import access, sections, tags as tagmod, tree
 from .embeddings import Embedder
 from .indexer import stale
-from .models import Document, DocumentChunk, DocumentTag, Domain, PgVector, Project, User
+from .models import Document, DocumentChunk, DocumentTag, Domain, PgVector, User
 
 SOURCES = ("public", "personal", "shared")
 RRF_K = 60
@@ -42,7 +42,7 @@ class SearchError(ValueError):
 class Filters:
     source: str | None = None                 # public | personal | shared
     domain_ids: list[str] | None = None
-    project_id: str | None = None
+    under_id: str | None = None                # a page: it and everything below it
     kind: str | None = None
     type: str | None = None
     tags: list[str] = field(default_factory=list)
@@ -74,8 +74,11 @@ def _conditions(s: Session, user: User | None, f: Filters) -> list | None:
     contribution marked as a duplicate gives way to the one it duplicates."""
     c = [Document.deleted_at.is_(None), access.visible_documents(s, user),
          Document.merged_into_id.is_(None)]
-    if f.project_id:
-        c.append(Document.project_id == f.project_id)
+    if f.under_id:
+        page = s.get(Document, f.under_id)
+        if page is None:
+            return None
+        c.append(Document.id.in_([page.id] + tree.descendant_ids(s, page)))
     if f.kind:
         c.append(Document.kind == f.kind)
     if f.type:
@@ -99,7 +102,7 @@ def _meta(doc: Document, d: Domain, user: User | None) -> dict:
     return {"id": doc.id, "title": doc.title, "kind": doc.kind, "type": doc.template_type,
             "domain_id": d.id, "domain": d.name, "source": source_of(d, user),
             "owner": d.owner.username if d.scope != "public" and d.owner else None,
-            "project_id": doc.project_id, "project": doc.project.name if doc.project else None,
+            "parent_id": doc.parent_id, "path": tree.path(doc),
             "tags": doc.tags, "updated_at": doc.updated_at.isoformat(), "status": doc.status}
 
 

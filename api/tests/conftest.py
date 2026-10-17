@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from webdoc import oidc
 from webdoc.config import Settings
 from webdoc.main import create_app
+from webdoc.storage import MemoryStore
 
 H = {"X-Webdoc": "1"}
 
@@ -62,9 +63,14 @@ def settings(database_url):
 
 
 @pytest.fixture
-def app_and_provider(settings):
+def store():
+    return MemoryStore()
+
+
+@pytest.fixture
+def app_and_provider(settings, store):
     provider = FakeProvider(settings)
-    return create_app(settings, provider), provider
+    return create_app(settings, provider, store), provider
 
 
 def sign_in(app, provider, sub: str, groups: list[str] | None = None) -> TestClient:

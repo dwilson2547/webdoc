@@ -209,22 +209,23 @@ def test_trash_restore_and_purge(app_and_provider, client):
     assert client.get(f"/api/documents/{doc['id']}").status_code == 404
 
 
-def test_projects_and_moving_between_domains(client):
+def test_moving_between_domains_takes_child_pages(client):
     d = personal(client)
     other = client.post("/api/domains", json={"name": "Work"}, headers=H).json()
-    p = client.post(f"/api/domains/{d['id']}/projects", json={"name": "Photo Dump"},
-                    headers=H).json()
-    assert p["slug"] == "photo-dump"
-    doc = new_doc(client, d["id"], project_id=p["id"])
-    assert doc["project"] == "Photo Dump"
-    lst = client.get(f"/api/documents?domain={d['id']}&project={p['id']}").json()
+    top = new_doc(client, d["id"], "Photo Dump")
+    doc = new_doc(client, d["id"], parent_id=top["id"])
+    assert doc["parent_id"] == top["id"] and doc["path"] == [{"id": top["id"], "title": "Photo Dump"}]
+    lst = client.get(f"/api/documents?domain={d['id']}&under={top['id']}").json()
     assert lst["total"] == 1
-    r = client.put(f"/api/documents/{doc['id']}", json={"base_revision": 1,
+    r = client.put(f"/api/documents/{top['id']}", json={"base_revision": 1,
                    "domain_id": other["id"]}, headers=H).json()
-    assert r["domain"] == "Work" and r["project_id"] is None
-    # A project from another domain is refused.
-    r = client.put(f"/api/documents/{doc['id']}", json={"base_revision": 2,
-                   "project_id": p["id"]}, headers=H)
+    assert r["domain"] == "Work" and r["parent_id"] is None
+    child = client.get(f"/api/documents/{doc['id']}").json()
+    assert child["domain"] == "Work" and child["parent_id"] == top["id"]
+    # A parent from another domain is refused.
+    stay = new_doc(client, d["id"], "Stays")
+    r = client.put(f"/api/documents/{stay['id']}", json={"base_revision": 1,
+                   "parent_id": top["id"]}, headers=H)
     assert r.status_code == 422
 
 
@@ -247,13 +248,14 @@ def test_document_size_limit(client):
 
 def test_export(client):
     d = personal(client)
-    p = client.post(f"/api/domains/{d['id']}/projects", json={"name": "Infra"}, headers=H).json()
-    doc = new_doc(client, d["id"], "Plan: v2", tags=["a"], project_id=p["id"])
+    p = new_doc(client, d["id"], "Infra", body="Infra notes.\n")
+    doc = new_doc(client, d["id"], "Plan: v2", tags=["a"], parent_id=p["id"])
     md = client.get(f"/api/documents/{doc['id']}/export").text
-    assert md.startswith("---\ntitle: 'Plan: v2'\nkind: document\ndomain: notes\nproject: infra\n")
+    assert md.startswith("---\ntitle: 'Plan: v2'\nkind: document\ndomain: notes\nparent: Infra\n"
+                         "position: 0\n")
     assert md.endswith("---\n\n# Plan\n\n## Goals\n\nShip.\n")
     z = zipfile.ZipFile(io.BytesIO(client.get(f"/api/domains/{d['id']}/export").content))
-    assert z.namelist() == ["notes/infra/Plan v2.md"]
+    assert z.namelist() == ["notes/Infra.md", "notes/Infra/Plan v2.md"]
 
 
 def test_writing_guide(client):

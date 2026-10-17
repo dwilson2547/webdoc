@@ -1,28 +1,43 @@
 """Markdown export (design §3): a document as a .md file with YAML frontmatter,
-a domain as a zip of them with one folder per project, so the result opens as
-an Obsidian vault or drops into a repo's docs/."""
+a domain as a zip of them laid out like its page tree, so the result opens as
+an Obsidian vault or drops into a repo's docs/.
+
+A page with child pages exports as `Title.md` next to a `Title/` folder
+holding them. Attachments go under `_attachments/<id>/<name>` at the top of
+the zip, and links to them in the body are rewritten to relative paths.
+"""
 
 from __future__ import annotations
 
 import io
 import re
 import zipfile
+from urllib.parse import quote
 
 import yaml
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Document, Domain
+from . import attachments, tree
+from .models import Attachment, Document, Domain
+
+ATTACH_DIR = "_attachments"
 
 
 def filename(title: str) -> str:
-    return (re.sub(r"[^A-Za-z0-9 _.()-]", "", title).strip()[:120] or "untitled") + ".md"
+    return stem(title) + ".md"
 
 
-def markdown(doc: Document) -> str:
+def stem(title: str) -> str:
+    return re.sub(r"[^A-Za-z0-9 _.()-]", "", title).strip()[:120] or "untitled"
+
+
+def markdown(doc: Document, body: str | None = None) -> str:
     meta = {"title": doc.title, "kind": doc.kind, "domain": doc.domain.slug}
-    if doc.project:
-        meta["project"] = doc.project.slug
+    parents = tree.ancestors(doc)
+    if parents:
+        meta["parent"] = tree.path(parents[-1])
+    meta["position"] = doc.position
     if doc.tags:
         meta["tags"] = doc.tags
     if doc.template_type:
@@ -32,23 +47,49 @@ def markdown(doc: Document) -> str:
     meta["updated"] = doc.updated_at.isoformat()
     meta["webdoc_id"] = doc.id
     head = yaml.safe_dump(meta, sort_keys=False, allow_unicode=True).strip()
-    return f"---\n{head}\n---\n\n{doc.body}"
+    return f"---\n{head}\n---\n\n{doc.body if body is None else body}"
 
 
-def domain_zip(s: Session, d: Domain) -> bytes:
+def domain_zip(s: Session, d: Domain, store=None) -> bytes:
+    """Published, live pages of the domain. `store` (storage.Store) adds the
+    attachments; without one, links to them are left as they are."""
     docs = s.scalars(select(Document).where(Document.domain_id == d.id,
                                             Document.deleted_at.is_(None),
                                             Document.status == "published")
-                     .order_by(Document.title)).all()
+                     .order_by(Document.position, Document.title)).all()
+    by_id = {x.id: x for x in docs}
+    kids: dict[str | None, list[Document]] = {}
+    for x in docs:
+        # A page whose parent isn't exported (a draft, a hidden page) goes to the top.
+        kids.setdefault(x.parent_id if x.parent_id in by_id else None, []).append(x)
+    files = {}
+    if store is not None and docs:
+        files = {a.id: a for a in s.scalars(select(Attachment).where(
+            Attachment.document_id.in_(list(by_id))))}
+
     buf = io.BytesIO()
-    used: set[str] = set()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        for doc in docs:
-            folder = f"{d.slug}/" + (f"{doc.project.slug}/" if doc.project else "")
-            name, n = folder + filename(doc.title), 1
-            while name in used:
-                n += 1
-                name = folder + filename(f"{doc.title} ({n})")
-            used.add(name)
-            z.writestr(name, markdown(doc))
+        def write_level(parent_id: str | None, folder: str, depth: int) -> None:
+            used: set[str] = set()
+            for doc in kids.get(parent_id, []):
+                name, n = stem(doc.title), 1
+                while name.lower() in used:
+                    n += 1
+                    name = stem(f"{doc.title} ({n})")
+                used.add(name.lower())
+                up = "../" * (depth - 1)
+                body = attachments.LINK_RE.sub(
+                    lambda m: (f"{up}{ATTACH_DIR}/{m.group(1)}/{quote(files[m.group(1)].name)}"
+                               if m.group(1) in files else m.group(0)), doc.body)
+                z.writestr(f"{folder}{name}.md", markdown(doc, body))
+                if kids.get(doc.id):
+                    write_level(doc.id, f"{folder}{name}/", depth + 1)
+
+        write_level(None, f"{d.slug}/", 1)
+        for a in files.values():
+            try:
+                data = b"".join(store.get(a.key))
+            except KeyError:
+                continue
+            z.writestr(f"{d.slug}/{ATTACH_DIR}/{a.id}/{a.name}", data)
     return buf.getvalue()

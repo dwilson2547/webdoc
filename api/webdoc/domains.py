@@ -1,4 +1,4 @@
-"""Domains, projects and role grants (design §3, §4, §5).
+"""Domains and role grants (design §3, §4, §5).
 
 Domains are an owner's closed taxonomy: this module is called from the web UI
 only. The MCP server can list domains but has no way to create, rename or
@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from . import access
 from .activity import Actor, record
-from .models import (PLATFORM, Document, Domain, DomainGrant, DomainRevision, Project, User,
+from .models import (PLATFORM, Document, Domain, DomainGrant, DomainRevision, User,
                      utcnow)
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
@@ -132,53 +132,6 @@ def out(s: Session, d: Domain, user: User | None, stats=None) -> dict:
             "can_contribute": (access.is_editor(user) and d.scope == "public"
                                and d.accepts_contributions),
             "last_activity": (last or d.updated_at).isoformat()}
-
-
-# --- projects -------------------------------------------------------------------
-
-def create_project(s: Session, actor: Actor, d: Domain, name: str,
-                   description: str = "") -> Project:
-    name, slug = _clean_name(name), _slug(name, None)
-    if s.scalar(select(Project.id).where(Project.domain_id == d.id, Project.slug == slug)):
-        raise DomainError(f"{d.name} already has a project {slug!r}")
-    p = Project(domain_id=d.id, slug=slug, name=name, description=(description or "").strip(),
-                created_by=actor.user.id)
-    s.add(p)
-    s.flush()
-    record(s, actor, "project.create", "project", p.id, f"created project {name} in {d.name}", d.id)
-    return p
-
-
-def find_project(s: Session, d: Domain, ref: str) -> Project:
-    """A project of this domain by id, slug or name."""
-    ref = (ref or "").strip()
-    p = s.scalar(select(Project).where(Project.domain_id == d.id, (Project.id == ref)
-                                       | (Project.slug == ref.lower())
-                                       | (func.lower(Project.name) == ref.lower())))
-    if p is None:
-        raise DomainError(f"{d.name} has no project {ref!r}; create_project makes one")
-    return p
-
-
-def projects(s: Session, d: Domain) -> list[Project]:
-    return list(s.scalars(select(Project).where(Project.domain_id == d.id).order_by(Project.name)))
-
-
-def rename_project(s: Session, actor: Actor, p: Project, name: str) -> Project:
-    p.name = _clean_name(name)
-    record(s, actor, "project.update", "project", p.id, f"renamed project to {p.name}", p.domain_id)
-    return p
-
-
-def delete_project(s: Session, actor: Actor, p: Project) -> None:
-    """Its documents stay in the domain, outside any project."""
-    record(s, actor, "project.delete", "project", p.id, f"deleted project {p.name}", p.domain_id)
-    s.delete(p)
-
-
-def project_out(p: Project) -> dict:
-    return {"id": p.id, "domain_id": p.domain_id, "slug": p.slug, "name": p.name,
-            "description": p.description}
 
 
 # --- grants ---------------------------------------------------------------------

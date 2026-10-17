@@ -1,4 +1,5 @@
-"""HTTP app: sign-in, domains, projects, documents and their history, agents, and the built UI.
+"""HTTP app: sign-in, domains, the page tree, documents and their history, attachments, agents,
+and the built UI.
 
 Sign-in, the OAuth consent page and token routes are copied from nodewright.
 Reads of public domains work signed out (design §4); everything else needs a
@@ -16,9 +17,9 @@ import re
 import threading
 import time
 from datetime import datetime
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, StreamingResponse
 from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
@@ -27,14 +28,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from starlette.routing import Route
 
-from . import (__version__, access, auth, contributions, documents, domains, embeddings, events,
-               export, feed, scan,
+from . import (__version__, access, attachments, auth, contributions, documents, domains,
+               embeddings, events, export, feed, scan, storage, tree,
                indexer as indexing, leases, mcp_server, oauth, oidc, proposals, search, sections,
                shares, styleguide, tags as tagmod, templates, tokens)
-from .activity import Actor
+from .activity import Actor, record
 from .config import Settings
 from .db import Database
-from .models import (PLATFORM, AccessToken, Document, DocumentTag, Domain, DomainRevision,
+from .models import (PLATFORM, AccessToken, Attachment, Document, DocumentTag, Domain, DomainRevision,
                      OAuthGrant, Report, ShareLink, StyleGuide, Template, TemplateRevision, User, utcnow)
 
 log = logging.getLogger("webdoc")
@@ -99,34 +100,36 @@ class GrantIn(BaseModel):
     role: str = Field(max_length=16)
 
 
-class ProjectIn(BaseModel):
-    name: str = Field(min_length=1, max_length=100)
-    description: str = Field(default="", max_length=2000)
-
-
 class DocumentIn(BaseModel):
     domain_id: str = Field(max_length=32)
     kind: str = Field(default="document", pattern="^(note|document|contribution)$")
     title: str = Field(min_length=1, max_length=300)
     body: str = ""
     tags: list[str] = []
-    project_id: str | None = Field(default=None, max_length=32)
+    parent_id: str | None = Field(default=None, max_length=32)
     type: str | None = Field(default=None, max_length=64)
     fields: dict[str, str] = {}
 
 
 class DocumentPut(BaseModel):
-    """Only the fields that are sent change. project_id: null means no project."""
+    """Only the fields that are sent change. parent_id: null means the top of the domain."""
     model_config = ConfigDict(extra="forbid")
     base_revision: int
     title: str | None = Field(default=None, min_length=1, max_length=300)
     body: str | None = None
     tags: list[str] | None = None
     fields: dict[str, str | None] | None = None
-    project_id: str | None = Field(default=None, max_length=32)
+    parent_id: str | None = Field(default=None, max_length=32)
     domain_id: str | None = Field(default=None, max_length=32)
     ack_warnings: bool = False
     """Publish an edit to a public contribution despite scan warnings."""
+
+
+class MoveIn(BaseModel):
+    """Where a page goes in its domain's tree: under parent_id (null: the top),
+    at position among its new siblings (null: last)."""
+    parent_id: str | None = Field(default=None, max_length=32)
+    position: int | None = Field(default=None, ge=0)
 
 
 class ContribSettingsIn(BaseModel):
@@ -218,7 +221,9 @@ class _Issuer(BaseModel):
     u: AnyHttpUrl
 
 
-def create_app(settings: Settings | None = None, provider: oidc.Provider | None = None) -> FastAPI:
+def create_app(settings: Settings | None = None, provider: oidc.Provider | None = None,
+               store: storage.Store | None = None) -> FastAPI:
+    """`store` overrides the attachment store the settings name (tests pass a MemoryStore)."""
     settings = settings or Settings.from_env()
     broker = events.Broker()
     db = Database(settings.database_url, broker)
@@ -228,6 +233,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     if settings.dev_login and not settings.dev_login_enabled:
         log.warning("DEV_LOGIN ignored: PUBLIC_URL is https")
     limit = settings.max_document_bytes
+    store = store if store is not None else storage.from_settings(settings)
 
     indexer = indexing.Indexer(db, embeddings.make(settings))
     mcp, mcp_app = mcp_server.build(db, settings, indexer)
@@ -296,7 +302,8 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
             raise HTTPException(429, str(exc)) from None
         except (documents.DocError, domains.DomainError, sections.SectionError,
                 tagmod.TagError, templates.TemplateError, proposals.ProposalError,
-                search.SearchError, shares.ShareError, contributions.ContribError) as exc:
+                search.SearchError, shares.ShareError, contributions.ContribError,
+                tree.TreeError) as exc:
             raise HTTPException(422, str(exc)) from None
 
     # --- meta and auth ------------------------------------------------------
@@ -308,7 +315,9 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     @app.get("/api/config")
     def public_config():
         return {"oidc": provider is not None, "dev_login": settings.dev_login_enabled,
-                "version": __version__, "max_document_bytes": limit}
+                "version": __version__, "max_document_bytes": limit,
+                "attachments": store is not None,
+                "max_attachment_bytes": settings.max_attachment_bytes}
 
     @app.get("/api/me")
     def me(user: User = Depends(user_dep)):
@@ -400,12 +409,12 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     anon_search = IpLimiter(ANON_SEARCHES_PER_MINUTE)
 
     def filters(source: str | None = None, domain_id: list[str] = Query([]),
-                project_id: str | None = None, kind: str | None = None, type: str | None = None,
+                under: str | None = None, kind: str | None = None, type: str | None = None,
                 tag: list[str] = Query([]), author: str | None = None,
                 updated_after: datetime | None = None,
                 updated_before: datetime | None = None) -> search.Filters:
         return search.Filters(source=source or None, domain_ids=domain_id or None,
-                              project_id=project_id or None, kind=kind or None,
+                              under_id=under or None, kind=kind or None,
                               type=type or None, tags=tag or [], author=author or None,
                               updated_after=updated_after, updated_before=updated_before)
 
@@ -445,7 +454,6 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
 
     def domain_detail(s: Session, d, user: User | None) -> dict:
         o = domains.out(s, d, user, domains.counts(s, [d.id]))
-        o["projects"] = [domains.project_out(p) for p in domains.projects(s, d)]
         o["can"] = sorted(access.ROLES.get(o["role"] or "", ()))
         o["assignable"] = access.assignable(s, user, d)
         o["contribution_type_names"] = (
@@ -489,7 +497,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     def export_domain(domain_id: str, user: User | None = Depends(maybe_user),
                       s: Session = Depends(session)):
         d = guard(access.domain, s, user, domain_id)
-        return Response(export.domain_zip(s, d), media_type="application/zip", headers={
+        return Response(export.domain_zip(s, d, store), media_type="application/zip", headers={
             "Content-Disposition": f'attachment; filename="{d.slug}.zip"'})
 
     # --- grants -------------------------------------------------------------
@@ -520,37 +528,40 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         guard(domains.remove_grant, s, actor_for(user), d, user_id)
         return Response(status_code=204)
 
-    # --- projects -----------------------------------------------------------
+    # --- page tree (tree.py) --------------------------------------------------
 
-    @app.post("/api/domains/{domain_id}/projects", status_code=201)
-    def create_project(domain_id: str, body: ProjectIn, user: User = Depends(user_dep),
-                       s: Session = Depends(session)):
-        d = guard(access.domain, s, user, domain_id, access.WRITE)
-        return domains.project_out(guard(domains.create_project, s, actor_for(user), d,
-                                         body.name, body.description))
+    @app.get("/api/domains/{domain_id}/tree")
+    def domain_tree(domain_id: str, user: User | None = Depends(maybe_user),
+                    s: Session = Depends(session)):
+        """Every page the caller can see, with parent and position, for the sidebar."""
+        d = guard(access.domain, s, user, domain_id)
+        return {"pages": tree.flat(s, user, d)}
 
-    @app.patch("/api/projects/{project_id}")
-    def rename_project(project_id: str, body: NameIn, user: User = Depends(user_dep),
-                       s: Session = Depends(session)):
-        p = guard(access.project, s, user, project_id, access.WRITE)
-        return domains.project_out(guard(domains.rename_project, s, actor_for(user), p, body.name))
-
-    @app.delete("/api/projects/{project_id}", status_code=204)
-    def delete_project(project_id: str, user: User = Depends(user_dep),
-                       s: Session = Depends(session)):
-        p = guard(access.project, s, user, project_id, access.MANAGE)
-        domains.delete_project(s, actor_for(user), p)
-        return Response(status_code=204)
+    @app.post("/api/documents/{doc_id}/move")
+    def move_document(doc_id: str, body: MoveIn, request: Request,
+                      user: User = Depends(user_dep), s: Session = Depends(session)):
+        """Change a page's parent (a revision) and/or its place among its siblings
+        (not one). Its child pages move with it."""
+        doc = guard(access.document, s, user, doc_id, access.WRITE)
+        guard(leases.check, s, doc.id, ui_holder(request, user))
+        parent = None
+        if body.parent_id:
+            parent = guard(access.document, s, user, body.parent_id)
+        if body.parent_id != doc.parent_id:
+            guard(documents.write, s, actor_for(user), doc, parent=parent, max_bytes=limit)
+        tree.place(s, doc, body.position)
+        return doc_full(s, doc, user)
 
     # --- documents ----------------------------------------------------------
 
     @app.get("/api/documents")
-    def list_documents(domain: str | None = None, project: str | None = None,
+    def list_documents(domain: str | None = None, under: str | None = None,
                        kind: str | None = None, tag: str | None = None, q: str | None = None,
                        trashed: bool = False, limit: int = 50, offset: int = 0,
                        user: User | None = Depends(maybe_user), s: Session = Depends(session)):
         ids = guard(documents.readable_domain_ids, s, user, [domain] if domain else None)
-        rows, total = documents.listing(s, user, domain_ids=ids, project_id=project, kind=kind,
+        page = guard(access.document, s, user, under) if under else None
+        rows, total = documents.listing(s, user, domain_ids=ids, under=page, kind=kind,
                                         tag=tag, q=q, trashed=trashed,
                                         limit=max(1, min(limit, 200)), offset=max(0, offset))
         return {"total": total, "documents": [documents.out(d, body=False) for d in rows]}
@@ -565,10 +576,10 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
                         max_bytes=limit)
             return doc_full(s, doc, user)
         d = guard(access.domain, s, user, body.domain_id, access.WRITE)
-        p = guard(access.project, s, user, body.project_id) if body.project_id else None
+        p = guard(access.document, s, user, body.parent_id) if body.parent_id else None
         spec = guard(templates.resolve, s, d, body.type) if body.type else None
         doc = guard(documents.create, s, actor_for(user), d, kind=body.kind, title=body.title,
-                    body=body.body, tags=body.tags, project=p, spec=spec, fields=body.fields,
+                    body=body.body, tags=body.tags, parent=p, spec=spec, fields=body.fields,
                     max_bytes=limit)
         return documents.out(doc, role=access.role_on(s, user, d))
 
@@ -593,6 +604,14 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         o["hidden_reason"] = doc.hidden_reason if doc.status == "hidden" else None
         if doc.kind == "contribution":
             o["contribution"] = contributions.thread(s, user, doc)
+        o["children"] = ([{"id": c.id, "title": c.title, "kind": c.kind, "type": c.template_type,
+                           "updated_at": c.updated_at.isoformat()}
+                          for c in tree.siblings(s, doc.domain_id, doc.id)
+                          if access.can_see(user, c, role)]
+                         if doc.kind != "contribution" else [])
+        o["attachments"] = [attachments.out(a) for a in s.scalars(
+            select(Attachment).where(Attachment.document_id == doc.id)
+            .order_by(Attachment.created_at.desc()))]
         if doc.template_type:
             try:
                 spec = templates.resolve(s, doc.domain, doc.template_type)
@@ -617,9 +636,9 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         target = guard(access.domain, s, user, body.domain_id, access.WRITE) \
             if body.domain_id and body.domain_id != doc.domain_id else None
         kw: dict = {}
-        if "project_id" in body.model_fields_set:
-            kw["project"] = (guard(access.project, s, user, body.project_id)
-                             if body.project_id else None)
+        if "parent_id" in body.model_fields_set:
+            kw["parent"] = (guard(access.document, s, user, body.parent_id)
+                            if body.parent_id else None)
         guard(documents.write, s, actor_for(user), doc, title=body.title, body=body.body,
               tags=body.tags, fields=body.fields, domain=target, base_revision=body.base_revision, max_bytes=limit,
               **kw)
@@ -641,9 +660,108 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         return doc_full(s, doc, user)
 
     @app.delete("/api/documents/{doc_id}/purge", status_code=204)
-    def purge_document(doc_id: str, user: User = Depends(user_dep), s: Session = Depends(session)):
+    def purge_document(doc_id: str, tasks: BackgroundTasks, user: User = Depends(user_dep),
+                       s: Session = Depends(session)):
         doc = guard(access.document, s, user, doc_id, access.PURGE, trashed=True)
-        guard(documents.purge, s, actor_for(user), doc)
+        keys = guard(documents.purge, s, actor_for(user), doc)
+        if store is not None and keys:
+            tasks.add_task(drop_objects, keys)
+        return Response(status_code=204)
+
+    # --- attachments (attachments.py, storage.py) -----------------------------
+
+    def drop_objects(keys: list[str]) -> None:
+        for k in keys:
+            try:
+                store.delete(k)
+            except Exception:  # noqa: BLE001
+                log.warning("attachments: could not delete %s", k, exc_info=True)
+
+    def need_store() -> storage.Store:
+        if store is None:
+            raise HTTPException(404, "attachments are not set up on this server")
+        return store
+
+    def serve_attachment(a: Attachment) -> StreamingResponse:
+        st = need_store()
+        try:
+            body = st.get(a.key)
+        except KeyError:
+            raise HTTPException(404, "the file is missing from storage") from None
+        inline = a.content_type in attachments.INLINE
+        disposition = ("inline" if inline else "attachment") + "; filename*=UTF-8''" + quote(a.name)
+        return StreamingResponse(body, media_type=a.content_type if inline else
+                                 "application/octet-stream", headers={
+            "Content-Disposition": disposition, "Content-Length": str(a.size),
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+            "Cache-Control": "private, max-age=31536000, immutable"})
+
+    @app.get("/api/documents/{doc_id}/attachments")
+    def list_attachments(doc_id: str, user: User | None = Depends(maybe_user),
+                         s: Session = Depends(session)):
+        doc = guard(access.document, s, user, doc_id, trashed=True)
+        rows = s.scalars(select(Attachment).where(Attachment.document_id == doc.id)
+                         .order_by(Attachment.created_at.desc()))
+        return {"attachments": [attachments.out(a) for a in rows]}
+
+    @app.post("/api/documents/{doc_id}/attachments", status_code=201)
+    async def upload_attachment(doc_id: str, request: Request, user: User = Depends(user_dep),
+                                s: Session = Depends(session)):
+        """The raw file as the body; its name in X-Filename (URL-encoded)."""
+        st = need_store()
+        doc = guard(access.document, s, user, doc_id, access.WRITE)
+        cap = settings.max_attachment_bytes
+        declared = request.headers.get("content-length")
+        if declared and declared.isdigit() and int(declared) > cap:
+            raise HTTPException(413, f"files are limited to {cap // (1024 * 1024)} MB")
+        chunks, size = [], 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > cap:
+                raise HTTPException(413, f"files are limited to {cap // (1024 * 1024)} MB")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        if not data:
+            raise HTTPException(422, "the file is empty")
+        a = Attachment(document_id=doc.id, uploader_id=user.id, size=len(data),
+                       name=attachments.clean_name(unquote(request.headers.get("x-filename", ""))),
+                       content_type=attachments.content_type(
+                           data, request.headers.get("content-type")))
+        s.add(a)
+        s.flush()
+        try:
+            await asyncio.to_thread(st.put, a.key, data, a.content_type)
+        except Exception:  # noqa: BLE001
+            log.exception("attachments: upload to the store failed")
+            raise HTTPException(502, "couldn't store the file; try again") from None
+        record(s, actor_for(user), "attachment.add", "document", doc.id,
+               f"attached {a.name} to {doc.title}", documents.feed_domain(doc))
+        return attachments.out(a)
+
+    @app.get("/api/attachments/{att_id}")
+    @app.get("/api/attachments/{att_id}/{name:path}")
+    def get_attachment(att_id: str, name: str = "", user: User | None = Depends(maybe_user),
+                       s: Session = Depends(session)):
+        """Whoever can read the document can read its files; the name in the
+        path is only there so links read well."""
+        a = s.get(Attachment, att_id)
+        if a is None:
+            raise HTTPException(404, "no such attachment")
+        guard(access.document, s, user, a.document_id)
+        return serve_attachment(a)
+
+    @app.delete("/api/attachments/{att_id}", status_code=204)
+    def delete_attachment(att_id: str, tasks: BackgroundTasks, user: User = Depends(user_dep),
+                          s: Session = Depends(session)):
+        need_store()
+        a = s.get(Attachment, att_id)
+        if a is None:
+            raise HTTPException(404, "no such attachment")
+        doc = guard(access.document, s, user, a.document_id, access.WRITE)
+        record(s, actor_for(user), "attachment.delete", "document", doc.id,
+               f"removed {a.name} from {doc.title}", documents.feed_domain(doc))
+        tasks.add_task(drop_objects, [a.key])
+        s.delete(a)
         return Response(status_code=204)
 
     @app.get("/api/documents/{doc_id}/export")
@@ -924,6 +1042,17 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     @app.get("/api/s/{token}")
     def open_share(token: str, s: Session = Depends(session)):
         return shares.shared_out(guard(shares.resolve, s, token))
+
+    @app.get("/api/s/{token}/attachments/{att_id}")
+    @app.get("/api/s/{token}/attachments/{att_id}/{name:path}")
+    def shared_attachment(token: str, att_id: str, name: str = "",
+                          s: Session = Depends(session)):
+        """A shared document's files, for the share page (it rewrites the links)."""
+        doc = guard(shares.resolve, s, token, count=False)
+        a = s.get(Attachment, att_id)
+        if a is None or a.document_id != doc.id:
+            raise HTTPException(404, "no such attachment")
+        return serve_attachment(a)
 
     @app.get("/api/tags")
     def list_tags(domain: str | None = None, user: User | None = Depends(maybe_user),

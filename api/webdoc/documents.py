@@ -12,9 +12,9 @@ import difflib
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from . import access, events, sections, tags as tagmod, templates
+from . import access, events, sections, tags as tagmod, templates, tree
 from .activity import Actor, record
-from .models import Document, DocumentRevision, DocumentTag, Domain, Project, User, utcnow
+from .models import Attachment, Document, DocumentRevision, DocumentTag, Domain, User, utcnow
 
 KINDS = ("note", "document", "contribution")
 MAX_TITLE = 300
@@ -55,7 +55,7 @@ def _snapshot(s: Session, doc: Document, actor: Actor, summary: str,
               source: str | None = None) -> DocumentRevision:
     rev = DocumentRevision(document_id=doc.id, revision=doc.revision, title=doc.title,
                            body=doc.body, tags=doc.tags, fields=dict(doc.fields or {}),
-                           domain_id=doc.domain_id, project_id=doc.project_id,
+                           domain_id=doc.domain_id, parent_id=doc.parent_id,
                            actor_id=actor.user.id, client=actor.client[:100],
                            source=source or actor.source, summary=summary[:300],
                            base_revision=base, restored_from=restored_from)
@@ -70,7 +70,7 @@ def feed_domain(doc: Document) -> str | None:
 
 
 def create(s: Session, actor: Actor, d: Domain, *, kind: str, title: str, body: str = "",
-           tags: list[str] | None = None, project: Project | None = None,
+           tags: list[str] | None = None, parent: Document | None = None,
            spec: "templates.Spec | None" = None, fields: dict | None = None,
            max_bytes: int = DEFAULT_MAX_BYTES, status: str = "published") -> Document:
     """With `spec` (a document type), the body defaults to the type's starter
@@ -78,8 +78,12 @@ def create(s: Session, actor: Actor, d: Domain, *, kind: str, title: str, body: 
     be present (design §6)."""
     if kind not in KINDS:
         raise DocError(f"kind must be one of {', '.join(KINDS)}")
-    if project is not None and project.domain_id != d.id:
-        raise DocError("that project belongs to another domain")
+    if parent is not None and kind == "contribution":
+        raise DocError("contributions stay out of the page tree")
+    try:
+        tree.check_parent(None, parent, d.id)
+    except tree.TreeError as exc:
+        raise DocError(str(exc)) from None
     clean = templates.clean_fields(spec, fields)
     if spec is not None:
         body = body if (body or "").strip() else templates.starter(spec.skeleton)
@@ -87,7 +91,9 @@ def create(s: Session, actor: Actor, d: Domain, *, kind: str, title: str, body: 
         gaps = templates.check(spec, body, clean)
         if gaps["missing_sections"] or gaps["missing_fields"]:
             raise DocError(_gap_text(spec, gaps))
-    doc = Document(domain_id=d.id, project_id=project.id if project else None, kind=kind,
+    pid = parent.id if parent else None
+    doc = Document(domain_id=d.id, parent_id=pid, position=tree.next_position(s, d.id, pid),
+                   kind=kind,
                    title=_title(title), body=_check_size(body, max_bytes), fields=clean,
                    template_type=spec.type if spec else None,
                    template_version=spec.version if spec else None, revision=1,
@@ -119,17 +125,19 @@ _UNSET = object()
 
 def write(s: Session, actor: Actor, doc: Document, *, title: str | None = None,
           body: str | None = None, tags: list[str] | None = None, fields: dict | None = None,
-          project=_UNSET,
+          parent=_UNSET,
           domain: Domain | None = None, base_revision: int | None = None,
           summary: str | None = None, source: str | None = None,
           restored_from: int | None = None, max_bytes: int = DEFAULT_MAX_BYTES) -> bool:
-    """Apply changes as one new revision. `project` is a Project or None (no
-    project); leave it out to keep the current one. Moving to another domain
-    clears the project unless a project of that domain is given. Returns False
-    (and writes nothing) when nothing changed."""
+    """Apply changes as one new revision. `parent` is a page or None (the top
+    of the domain); leave it out to keep the current one. Moving to another
+    domain puts the page at the top there unless a parent in that domain is
+    given, and takes its child pages along. Returns False (and writes nothing)
+    when nothing changed."""
     if base_revision is not None and base_revision != doc.revision:
         raise Conflict(doc.revision)
     changed: list[str] = []
+    old_domain = doc.domain_id
     if title is not None and _title(title) != doc.title:
         doc.title = _title(title)
         changed.append("title")
@@ -154,18 +162,28 @@ def write(s: Session, actor: Actor, doc: Document, *, title: str | None = None,
     if domain is not None and domain.id != doc.domain_id:
         if doc.kind == "contribution":
             raise DocError("contributions stay in the domain they were posted to")
+        moving = domain
         doc.domain_id = domain.id
         doc.domain = domain
         changed.append(f"moved to {domain.name}")
-        if project is _UNSET:
-            project = None
-    if project is not _UNSET:
-        pid = project.id if project is not None else None
-        if project is not None and project.domain_id != doc.domain_id:
-            raise DocError("that project belongs to another domain")
-        if pid != doc.project_id:
-            doc.project_id = pid
-            changed.append("project")
+        if parent is _UNSET:
+            parent = None
+    else:
+        moving = None
+    if parent is not _UNSET:
+        pid = parent.id if parent is not None else None
+        try:
+            tree.check_parent(doc, parent, doc.domain_id)
+        except tree.TreeError as exc:
+            raise DocError(str(exc)) from None
+        if pid != doc.parent_id:
+            left = doc.parent_id
+            doc.parent_id = pid
+            doc.parent = parent
+            doc.position = tree.next_position(s, doc.domain_id, pid)
+            s.flush()
+            tree.renumber(s, old_domain, left)
+            changed.append(f"moved under {parent.title}" if parent else "moved to the top")
     if not changed:
         return False
     doc.revision += 1
@@ -177,6 +195,13 @@ def write(s: Session, actor: Actor, doc: Document, *, title: str | None = None,
            feed_domain(doc))
     events.queue(s, doc.id, {"type": "revision", "revision": doc.revision, "by": actor.label,
                              "user_id": actor.user.id, "client": actor.client, "summary": note})
+    if moving is not None:
+        # Child pages follow their parent into the new domain, top-down so each
+        # one's parent is already there.
+        for child in list(s.scalars(select(Document).where(Document.parent_id == doc.id,
+                                                           Document.domain_id == old_domain))):
+            write(s, actor, child, domain=moving, parent=doc,
+                  summary=f"moved to {moving.name} with {doc.title}", max_bytes=max_bytes)
     return True
 
 
@@ -189,28 +214,56 @@ def edit(s: Session, actor: Actor, doc: Document, ops: list[dict],
 
 
 def trash(s: Session, actor: Actor, doc: Document) -> None:
-    doc.deleted_at, doc.deleted_by = utcnow(), actor.user.id
-    events.queue(s, doc.id, {"type": "trashed", "by": actor.label})
-    record(s, actor, "document.delete", "document", doc.id, f"moved {doc.title} to the trash",
-           feed_domain(doc))
+    """Trash a page and every page below it, all with the same time, so
+    restoring the page brings back what went with it."""
+    now = utcnow()
+    below = tree.descendant_ids(s, doc, Document.deleted_at.is_(None))
+    for d in [doc] + [s.get(Document, i) for i in below]:
+        d.deleted_at, d.deleted_by = now, actor.user.id
+        events.queue(s, d.id, {"type": "trashed", "by": actor.label})
+    extra = f" and {len(below)} page{'s' if len(below) != 1 else ''} below it" if below else ""
+    record(s, actor, "document.delete", "document", doc.id,
+           f"moved {doc.title}{extra} to the trash", feed_domain(doc))
 
 
 def untrash(s: Session, actor: Actor, doc: Document) -> None:
+    """Restore a page and the pages trashed along with it. If its parent is
+    still in the trash, it comes back under the nearest live ancestor."""
     if doc.deleted_at is None:
         raise DocError("the document is not in the trash")
-    doc.deleted_at, doc.deleted_by = None, None
-    events.queue(s, doc.id, {"type": "restored", "by": actor.label})
+    when = doc.deleted_at
+    below = [s.get(Document, i) for i in tree.descendant_ids(s, doc, Document.deleted_at == when)]
+    node = doc.parent
+    while node is not None and node.deleted_at is not None:
+        node = node.parent
+    if node is not doc.parent:
+        doc.parent_id, doc.parent = (node.id if node else None), node
+        doc.position = tree.next_position(s, doc.domain_id, doc.parent_id)
+    for d in [doc] + below:
+        d.deleted_at, d.deleted_by = None, None
+        events.queue(s, d.id, {"type": "restored", "by": actor.label})
     record(s, actor, "document.restore", "document", doc.id, f"restored {doc.title} from the trash",
            feed_domain(doc))
 
 
-def purge(s: Session, actor: Actor, doc: Document) -> None:
+def purge(s: Session, actor: Actor, doc: Document) -> list[str]:
+    """Delete a trashed page, the trashed pages below it and their history.
+    Returns the attachment keys to drop from the store."""
     if doc.deleted_at is None:
         raise DocError("move the document to the trash before purging it")
+    below = [s.get(Document, i) for i in tree.descendant_ids(s, doc)]
+    if any(d.deleted_at is None for d in below):
+        raise DocError("some pages below this one aren't in the trash; move or trash them first")
+    gone = [doc] + below
+    keys = list(s.scalars(select(Attachment).where(
+        Attachment.document_id.in_([d.id for d in gone]))))
     record(s, actor, "document.purge", "document", doc.id, f"permanently deleted {doc.title}",
            feed_domain(doc))
-    events.queue(s, doc.id, {"type": "purged", "by": actor.label})
-    s.delete(doc)
+    for d in reversed(gone):
+        events.queue(s, d.id, {"type": "purged", "by": actor.label})
+        s.delete(d)
+        s.flush()
+    return [a.key for a in keys]
 
 
 # --- history --------------------------------------------------------------------
@@ -285,8 +338,8 @@ def revision_out(r: DocumentRevision) -> dict:
 
 def out(doc: Document, *, body: bool = True, role: str | None = None) -> dict:
     o = {"id": doc.id, "kind": doc.kind, "title": doc.title, "domain_id": doc.domain_id,
-         "domain": doc.domain.name, "project_id": doc.project_id,
-         "project": doc.project.name if doc.project else None, "tags": doc.tags,
+         "domain": doc.domain.name, "parent_id": doc.parent_id, "position": doc.position,
+         "path": [{"id": a.id, "title": a.title} for a in tree.ancestors(doc)], "tags": doc.tags,
          "type": doc.template_type, "fields": dict(doc.fields or {}),
          "revision": doc.revision, "status": doc.status, "created_at": doc.created_at.isoformat(),
          "updated_at": doc.updated_at.isoformat(),
@@ -299,7 +352,8 @@ def out(doc: Document, *, body: bool = True, role: str | None = None) -> dict:
     return o
 
 
-def listing(s: Session, user: User | None, *, domain_ids: list[str], project_id: str | None = None,
+def listing(s: Session, user: User | None, *, domain_ids: list[str],
+            under: Document | None = None,
             kind: str | None = None, tag: str | None = None, q: str | None = None,
             trashed: bool = False, limit: int = 50, offset: int = 0) -> tuple[list[Document], int]:
     """Documents in the given (already authorised) domains, newest first."""
@@ -308,8 +362,8 @@ def listing(s: Session, user: User | None, *, domain_ids: list[str], project_id:
     stmt = select(Document).where(Document.domain_id.in_(domain_ids),
                                   access.visible_documents(s, user))
     stmt = stmt.where(Document.deleted_at.is_not(None) if trashed else Document.deleted_at.is_(None))
-    if project_id:
-        stmt = stmt.where(Document.project_id == project_id)
+    if under is not None:
+        stmt = stmt.where(Document.id.in_(tree.descendant_ids(s, under) or [""]))
     if kind:
         stmt = stmt.where(Document.kind == kind)
     if tag:

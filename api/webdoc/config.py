@@ -23,6 +23,15 @@ class Settings:
     every sign-in, so removing someone from the group demotes them next time."""
     session_ttl_days: int = 30
     max_document_bytes: int = 1024 * 1024
+    s3_endpoint: str | None = None
+    """AIStor/S3 API for attachments, e.g. http://192.168.0.10:30320."""
+    s3_bucket: str | None = None
+    s3_access_key: str | None = None
+    s3_secret_key: str | None = None
+    s3_region: str = "us-east-1"
+    attachments_dir: str | None = None
+    """Local alternative to S3 (development); attachments are off with neither."""
+    max_attachment_bytes: int = 20 * 1024 * 1024
     static_dir: str | None = None
     embedder: str = "fastembed"
     """fastembed (the local model, design §8), hash (a crude stand-in for tests
@@ -61,6 +70,13 @@ class Settings:
             editor_group=(env.get("EDITOR_GROUP") or "").strip() or None,
             session_ttl_days=int(env.get("SESSION_TTL_DAYS") or cls.session_ttl_days),
             max_document_bytes=int(env.get("MAX_DOCUMENT_BYTES") or cls.max_document_bytes),
+            s3_endpoint=env.get("S3_ENDPOINT") or None,
+            s3_bucket=env.get("S3_BUCKET") or None,
+            s3_access_key=env.get("S3_ACCESS_KEY") or None,
+            s3_secret_key=env.get("S3_SECRET_KEY") or None,
+            s3_region=env.get("S3_REGION") or cls.s3_region,
+            attachments_dir=env.get("ATTACHMENTS_DIR") or None,
+            max_attachment_bytes=int(env.get("MAX_ATTACHMENT_BYTES") or cls.max_attachment_bytes),
             static_dir=env.get("STATIC_DIR") or None,
             embedder=(env.get("EMBEDDER") or cls.embedder).strip().lower(),
             model_dir=env.get("MODEL_DIR") or None,

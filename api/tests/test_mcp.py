@@ -25,7 +25,7 @@ def test_unknown_domain_is_refused_with_a_pointer_to_the_user(mcp):
 def test_create_read_and_edit_by_section(mcp):
     agent, web = mcp
     doc = agent.call("create_document", title="Design", domain="notes", body=BODY,
-                     tags=["infra"], project=None)
+                     tags=["infra"], parent=None)
     assert doc["url"].endswith("/d/" + doc["id"])
     got = agent.call("get_document", document_id=doc["id"], heading_path=["Auth"])
     assert got["section"] == "## Auth\n\nauthentik.\n" and "body" not in got
@@ -74,20 +74,32 @@ def test_tag_hints_on_new_tags(mcp):
     assert r["tag_hints"] == {"kubernete": ["kubernetes"]}
 
 
-def test_projects_listing_and_trash(mcp):
+def test_page_tree_listing_and_trash(mcp):
     agent, _ = mcp
-    agent.call("create_project", domain="notes", name="Photo Dump")
-    doc = agent.call("create_note", title="Ingress gotcha", domain="notes", project="photo-dump")
+    agent.call("create_document", title="Photo Dump", domain="notes")
+    doc = agent.call("create_note", title="Ingress gotcha", domain="notes", parent="photo dump")
+    assert doc["path"] == "Photo Dump/Ingress gotcha"
     agent.call("create_note", title="Other", domain="notes")
-    lst = agent.call("list_documents", domain="notes", project="Photo Dump")
+    lst = agent.call("list_documents", domain="notes", under="Photo Dump")
     assert [d["title"] for d in lst["documents"]] == ["Ingress gotcha"]
     assert agent.call("list_documents", title_contains="gotcha")["total"] == 1
-    assert agent.call("list_domains")["domains"][0]["projects"] == ["Photo Dump"]
+    assert agent.call("list_domains")["domains"][0]["top_pages"] == ["Photo Dump", "Other"]
+    t = agent.call("list_tree", domain="notes")["pages"]
+    assert [(p["title"], [c["title"] for c in p.get("children", [])]) for p in t] == [
+        ("Photo Dump", ["Ingress gotcha"]), ("Other", [])]
+    assert "no page 'Nope'" in agent.error("create_note", title="x", domain="notes",
+                                            parent="Photo Dump/Nope")
     agent.call("delete_document", document_id=doc["id"])
     assert agent.call("list_documents", trashed=True)["documents"][0]["id"] == doc["id"]
     assert "not found" in agent.error("get_document", document_id=doc["id"])
     agent.call("restore_document", document_id=doc["id"])
     assert agent.call("get_document", document_id=doc["id"])["title"] == "Ingress gotcha"
+    other = agent.call("list_documents", domain="notes", title_contains="Other")["documents"][0]
+    agent.call("update_document", document_id=other["id"], parent="Photo Dump")
+    assert agent.call("list_tree", domain="notes", under="Photo Dump", depth=1)["pages"][1][
+        "title"] == "Other"
+    assert "under itself" in agent.error("update_document", document_id=doc["id"],
+                                         parent="Photo Dump/Ingress gotcha")
 
 
 def test_versions_diff_and_restore(mcp):

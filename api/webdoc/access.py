@@ -11,10 +11,10 @@ from fastapi import HTTPException
 from sqlalchemy import and_, false, or_, select
 from sqlalchemy.orm import Session
 
-from .models import Document, Domain, DomainGrant, Project, User
+from .models import Document, Domain, DomainGrant, User
 
 READ = "read"
-WRITE = "write"                  # create and edit documents, notes and projects
+WRITE = "write"                  # create and edit documents and notes
 DELETE = "delete"                # move to trash, restore from trash
 PURGE = "purge"                  # delete permanently
 MANAGE = "manage"                # rename, describe or delete the domain itself
@@ -95,17 +95,6 @@ def domain(s: Session, user: User | None, domain_id: str, action: str = READ) ->
     if action not in ROLES[role]:
         raise Denied("you can't do that in this domain", 403)
     return d
-
-
-def project(s: Session, user: User | None, project_id: str, action: str = READ) -> Project:
-    p = s.get(Project, project_id)
-    if p is None:
-        raise Denied("project not found")
-    try:
-        domain(s, user, p.domain_id, action)
-    except Denied as exc:
-        raise Denied("project not found" if exc.status == 404 else str(exc), exc.status) from None
-    return p
 
 
 def can_see(user: User | None, doc: Document, role: str | None) -> bool:

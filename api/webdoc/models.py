@@ -282,25 +282,11 @@ class DomainGrant(Base):
     user: Mapped[User] = relationship(foreign_keys=[user_id])
 
 
-class Project(Base):
-    """Optional, flat grouping inside a domain; agents may create them."""
-    __tablename__ = "projects"
-    __table_args__ = (UniqueConstraint("domain_id", "slug"),)
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    domain_id: Mapped[str] = mapped_column(
-        ForeignKey("domains.id", ondelete="CASCADE"), index=True)
-    slug: Mapped[str] = mapped_column(String(64))
-    name: Mapped[str] = mapped_column(String(100))
-    description: Mapped[str] = mapped_column(Text, default="")
-    created_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
 class Document(Base):
     """A note or a document. `body` is markdown without frontmatter; title,
     tags and fields live in columns and become frontmatter on export.
+    Documents form a tree inside their domain (`parent_id`, tree.py): any
+    document can have child pages, so a "folder" is just a page with children.
     `revision` increments on every write and every write is kept in
     document_revisions. A deleted document is in the trash (deleted_at set)
     until purged."""
@@ -309,8 +295,11 @@ class Document(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     domain_id: Mapped[str] = mapped_column(
         ForeignKey("domains.id", ondelete="CASCADE"), index=True)
-    project_id: Mapped[str | None] = mapped_column(
-        ForeignKey("projects.id", ondelete="SET NULL"), nullable=True, index=True)
+    parent_id: Mapped[str | None] = mapped_column(
+        ForeignKey("documents.id", ondelete="SET NULL"), nullable=True, index=True)
+    """The page this one sits under, in the same domain; None at the top."""
+    position: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    """Order among its siblings (tree.py keeps them numbered 0..n-1)."""
     kind: Mapped[str] = mapped_column(String(16))
     """note | document (| contribution later)."""
     title: Mapped[str] = mapped_column(String(300))
@@ -343,7 +332,7 @@ class Document(Base):
     documents where it differs from `revision` (indexer.py)."""
 
     domain: Mapped[Domain] = relationship()
-    project: Mapped[Project | None] = relationship()
+    parent: Mapped["Document | None"] = relationship(remote_side="Document.id")
     author: Mapped[User | None] = relationship(foreign_keys=[created_by])
     tag_rows: Mapped[list["DocumentTag"]] = relationship(
         cascade="all, delete-orphan", passive_deletes=True, order_by="DocumentTag.tag")
@@ -376,7 +365,7 @@ class DocumentRevision(Base):
     tags: Mapped[list] = mapped_column(Json, default=list)
     fields: Mapped[dict] = mapped_column(Json, default=dict)
     domain_id: Mapped[str] = mapped_column(String(32))
-    project_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    parent_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     actor_id: Mapped[str | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     client: Mapped[str] = mapped_column(String(100), default="web")
@@ -465,6 +454,29 @@ class ShareLink(Base):
     last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     creator: Mapped[User | None] = relationship()
+
+
+class Attachment(Base):
+    """A file uploaded to a document (attachments.py); the bytes live in the
+    object store under `key`. The body refers to it as
+    /api/attachments/<id>/<name>, so it reads as an ordinary link."""
+    __tablename__ = "attachments"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    document_id: Mapped[str] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    uploader_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    name: Mapped[str] = mapped_column(String(200))
+    content_type: Mapped[str] = mapped_column(String(100))
+    size: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    uploader: Mapped[User | None] = relationship()
+
+    @property
+    def key(self) -> str:
+        return f"attachments/{self.document_id}/{self.id}"
 
 
 class Reply(Base):

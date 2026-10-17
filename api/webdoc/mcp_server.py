@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any, Callable, Literal
 
 from pydantic import Field
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -22,12 +23,13 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.streamable_http_manager import StreamableHTTPASGIApp
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import (__version__, access, contributions, documents, domains, feed, leases, proposals,
-               search as searching, sections, styleguide, tags as tagmod, templates, tokens)
+from . import (__version__, access, attachments, contributions, documents, domains, feed, leases,
+               proposals, search as searching, sections, styleguide, tags as tagmod, templates,
+               tokens, tree)
 from .activity import Actor
 from .config import Settings
 from .db import Database
-from .models import Domain, User
+from .models import Attachment, Domain, User
 
 INSTRUCTIONS = """\
 webdoc is a shared knowledge base of markdown notes and documents. You are acting for
@@ -42,9 +44,11 @@ the signed-in user who connected you, with their permissions.
   section following its guidance, and pass type (and the required fields) to
   create_document. list_templates shows the types a domain has. To add or change a type,
   propose_template; only the user can approve it.
-- Projects (optional, inside a domain) and tags are open: create_project makes a project,
-  and tags are free text. When you introduce a new tag, check the tag_hints in the reply:
-  reuse an existing tag if one means the same thing.
+- Inside a domain, documents form a page tree: any page can hold child pages. list_tree
+  shows it; pass parent (a page id, or a title path such as "Infra/k8s") to create a page
+  under another, and update_document moves one. File new pages where they belong in the
+  tree rather than at the top. Tags are free text: when you introduce a new tag, check the
+  tag_hints in the reply and reuse an existing tag if one means the same thing.
 - Call get_writing_guide before writing: it says how this user likes documents written.
 - Look before you create: search (by meaning) for an existing document on the subject and
   add to it rather than starting a near-duplicate. find looks up exact text (an error
@@ -136,7 +140,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                                 "in a loop.") from None
             except (documents.DocError, domains.DomainError, sections.SectionError,
                     tagmod.TagError, templates.TemplateError, proposals.ProposalError,
-                    searching.SearchError, contributions.ContribError) as exc:
+                    searching.SearchError, contributions.ContribError, tree.TreeError) as exc:
                 raise ToolError(str(exc)) from None
 
     def holder(actor: Actor) -> leases.Holder:
@@ -176,7 +180,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
 
     def doc_brief(doc) -> dict:
         return {"id": doc.id, "kind": doc.kind, "title": doc.title, "domain": doc.domain.slug,
-                "project": doc.project.name if doc.project else None, "tags": doc.tags,
+                "path": tree.path(doc), "tags": doc.tags,
                 "revision": doc.revision, "updated_at": doc.updated_at.isoformat()}
 
     def tag_hints(s: Session, d: Domain, new: list[str] | None) -> dict:
@@ -188,26 +192,29 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
     @server.tool()
     def list_domains(ctx: Context) -> dict:
         """The domains you can use (the user's closed taxonomy, plus public and
-        shared ones), each with your role, its projects and document count."""
+        shared ones), each with your role, document count and its top-level pages."""
         def go(s, user, actor):
             ds = access.visible_domains(s, user)
             stats = domains.counts(s, [d.id for d in ds])
             out = []
             for d in ds:
                 o = domains.out(s, d, user, stats)
-                o["projects"] = [p.name for p in domains.projects(s, d)]
+                o["top_pages"] = [x["title"] for x in tree.outline(s, user, d, depth=0)][:50]
                 out.append(o)
             return {"domains": out}
         return run(ctx, go)
 
     @server.tool()
-    def create_project(ctx: Context, domain: str,
-                       name: Annotated[str, Field(min_length=1, max_length=100)],
-                       description: str = "") -> dict:
-        """Add a project (an optional grouping) inside a domain you can edit."""
+    def list_tree(ctx: Context, domain: str, under: str | None = None,
+                  depth: Annotated[int | None, Field(ge=1, le=20)] = None) -> dict:
+        """A domain's page tree: titles, ids, kinds and child pages, siblings in
+        order. under (a page id or title path) shows only what is below that page;
+        depth limits how many levels come back (child_count says what was cut)."""
         def go(s, user, actor):
-            d = find_domain(s, user, domain, access.WRITE)
-            return domains.project_out(domains.create_project(s, actor, d, name, description))
+            d = find_domain(s, user, domain)
+            page = tree.resolve(s, d, under) if under else None
+            return {"domain": d.slug, "under": tree.path(page) if page else None,
+                    "pages": tree.outline(s, user, d, page, depth)}
         return run(ctx, go)
 
     @server.tool()
@@ -219,32 +226,33 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         return run(ctx, go)
 
     @server.tool()
-    def list_documents(ctx: Context, domain: str | None = None, project: str | None = None,
+    def list_documents(ctx: Context, domain: str | None = None, under: str | None = None,
                        kind: Kind | None = None, tag: str | None = None,
                        title_contains: str | None = None, trashed: bool = False,
                        limit: Annotated[int, Field(ge=1, le=200)] = 50,
                        offset: Annotated[int, Field(ge=0)] = 0) -> dict:
         """Documents and notes you can read, newest first, without their bodies.
-        Filter by domain (id or slug), project (name, needs domain), kind, tag or
-        a piece of the title. trashed lists the trash instead."""
+        Filter by domain (id or slug), under (a page id or title path, needs domain:
+        everything below that page), kind, tag or a piece of the title. trashed lists
+        the trash instead. list_tree shows the structure."""
         def go(s, user, actor):
-            pid = None
+            page = None
             if domain:
                 d = find_domain(s, user, domain)
                 ids = [d.id]
-                if project:
-                    pid = domains.find_project(s, d, project).id
+                if under:
+                    page = tree.resolve(s, d, under)
             else:
-                if project:
-                    raise ToolError("project needs domain")
+                if under:
+                    raise ToolError("under needs domain")
                 ids = documents.readable_domain_ids(s, user)
-            rows, total = documents.listing(s, user, domain_ids=ids, project_id=pid, kind=kind,
+            rows, total = documents.listing(s, user, domain_ids=ids, under=page, kind=kind,
                                             tag=tag, q=title_contains, trashed=trashed,
                                             limit=limit, offset=offset)
             return {"total": total, "documents": [doc_brief(d) for d in rows]}
         return run(ctx, go)
 
-    def search_filters(s: Session, user: User, domain: str | None, project: str | None,
+    def search_filters(s: Session, user: User, domain: str | None, under: str | None,
                        kind: str | None, type_: str | None, tags: list[str] | None,
                        source: str | None, author: str | None,
                        updated_after: str | None) -> searching.Filters:
@@ -253,10 +261,10 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         if domain:
             d = find_domain(s, user, domain)
             f.domain_ids = [d.id]
-            if project:
-                f.project_id = domains.find_project(s, d, project).id
-        elif project:
-            raise ToolError("project needs domain")
+            if under:
+                f.under_id = tree.resolve(s, d, under).id
+        elif under:
+            raise ToolError("under needs domain")
         if updated_after:
             try:
                 f.updated_after = datetime.fromisoformat(updated_after)
@@ -266,7 +274,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
 
     @server.tool()
     def search(ctx: Context, query: Annotated[str, Field(min_length=1, max_length=500)],
-               domain: str | None = None, project: str | None = None, kind: Kind | None = None,
+               domain: str | None = None, under: str | None = None, kind: Kind | None = None,
                type: str | None = None, tags: list[str] | None = None,
                source: Source | None = None, author: str | None = None,
                updated_after: str | None = None,
@@ -275,10 +283,11 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         the user's own and those shared with them. Each result has its source and
         domain, the best-matching section (heading) and a snippet; get_document with
         that heading_path reads the section. Filters narrow it: domain (id or slug),
-        project (needs domain), kind, type (document type), tags (all must match),
+        under (a page id or title path, needs domain: that page and everything below
+        it), kind, type (document type), tags (all must match),
         source, author (username), updated_after (ISO date)."""
         def go(s, user, actor):
-            f = search_filters(s, user, domain, project, kind, type, tags, source, author,
+            f = search_filters(s, user, domain, under, kind, type, tags, source, author,
                                updated_after)
             emb = indexer.semantic if indexer is not None else None
             out = searching.search(s, user, emb, query, f, limit=limit)
@@ -295,7 +304,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
     @server.tool()
     def find(ctx: Context, text: Annotated[str, Field(min_length=1, max_length=200)],
              whole_word: bool = True, case_sensitive: bool = False,
-             domain: str | None = None, project: str | None = None, kind: Kind | None = None,
+             domain: str | None = None, under: str | None = None, kind: Kind | None = None,
              type: str | None = None, tags: list[str] | None = None,
              source: Source | None = None, author: str | None = None,
              updated_after: str | None = None,
@@ -305,7 +314,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         line numbers and sections. whole_word (default) won't match inside longer
         words. Same filters as search. No embeddings, so nothing is missed or blurred."""
         def go(s, user, actor):
-            f = search_filters(s, user, domain, project, kind, type, tags, source, author,
+            f = search_filters(s, user, domain, under, kind, type, tags, source, author,
                                updated_after)
             out = searching.find(s, user, text, f, whole_word=whole_word,
                                  case_sensitive=case_sensitive, limit=limit)
@@ -344,8 +353,9 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                          description="Read just this section, e.g. [\"Architecture\", \"Auth\"].")
                      ] = None,
                      revision: int | None = None) -> dict:
-        """A document's markdown, metadata and outline (its heading paths). Pass
-        heading_path for one section, or revision for an earlier version."""
+        """A document's markdown, metadata, outline (its heading paths), place in the
+        tree (path, child_pages) and attached files. Pass heading_path for one
+        section, or revision for an earlier version."""
         def go(s, user, actor):
             doc = access.document(s, user, document_id, trashed=revision is not None)
             o = documents.out(doc, role=access.role_on(s, user, doc.domain))
@@ -357,6 +367,12 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                 r = documents.revision(s, doc, revision)
                 o.update(title=r.title, body=r.body, tags=list(r.tags or []), revision=r.revision)
             o["outline"] = sections.outline(o["body"])
+            o["child_pages"] = [{"id": c.id, "title": c.title}
+                                for c in tree.siblings(s, doc.domain_id, doc.id)
+                                if access.can_see(user, c, o.get("role"))]
+            files = s.scalars(select(Attachment).where(Attachment.document_id == doc.id))
+            o["attachments"] = [{"name": a.name, "content_type": a.content_type, "size": a.size,
+                                 "url": settings.public_url + attachments.url(a)} for a in files]
             if doc.template_type:
                 try:
                     spec = templates.resolve(s, doc.domain, doc.template_type)
@@ -374,22 +390,23 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         return run(ctx, go)
 
     def create(ctx: Context, kind: str, title: str, domain: str, body: str,
-               tags: list[str] | None, project: str | None, type_: str | None = None,
+               tags: list[str] | None, parent: str | None, type_: str | None = None,
                fields: dict | None = None) -> dict:
         def go(s, user, actor):
             d = find_domain(s, user, domain, access.WRITE)
-            p = domains.find_project(s, d, project) if project else None
+            p = tree.resolve(s, d, parent) if parent else None
             spec = templates.resolve(s, d, type_) if type_ else None
             hints = tag_hints(s, d, tags)
             doc = documents.create(s, actor, d, kind=kind, title=title, body=body, tags=tags,
-                                   project=p, spec=spec, fields=fields, max_bytes=limit)
-            return {"id": doc.id, "url": url(doc.id), "revision": doc.revision, **hints}
+                                   parent=p, spec=spec, fields=fields, max_bytes=limit)
+            return {"id": doc.id, "url": url(doc.id), "revision": doc.revision,
+                    "path": tree.path(doc), **hints}
         return run(ctx, go)
 
     @server.tool()
     def create_document(ctx: Context, title: Annotated[str, Field(min_length=1, max_length=300)],
                         domain: str, body: str = "", tags: list[str] | None = None,
-                        project: str | None = None,
+                        parent: str | None = None,
                         type: Annotated[str | None, Field(description=(
                             "A document type from list_templates, e.g. architecture. The body must "
                             "then contain the type's required sections (leave it empty to start "
@@ -398,15 +415,17 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                             "Values for the type's fields, e.g. {\"status\": \"draft\"}."))] = None
                         ) -> dict:
         """Create a document: longer-lived, organised under markdown headings.
-        domain is an id or slug from list_domains; project a project name in it."""
-        return create(ctx, "document", title, domain, body, tags, project, type, fields)
+        domain is an id or slug from list_domains; parent the page to put it under
+        (an id or title path such as "Infra/k8s"; omit for the top of the domain)."""
+        return create(ctx, "document", title, domain, body, tags, parent, type, fields)
 
     @server.tool()
     def create_note(ctx: Context, title: Annotated[str, Field(min_length=1, max_length=300)],
                     domain: str, body: str = "", tags: list[str] | None = None,
-                    project: str | None = None) -> dict:
-        """Create a note: one short, self-contained fact, decision or finding."""
-        return create(ctx, "note", title, domain, body, tags, project)
+                    parent: str | None = None) -> dict:
+        """Create a note: one short, self-contained fact, decision or finding.
+        parent is the page to put it under, as for create_document."""
+        return create(ctx, "note", title, domain, body, tags, parent)
 
     @server.tool()
     def edit_document(ctx: Context, document_id: str,
@@ -435,22 +454,24 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                         tags: list[str] | None = None,
                         fields: Annotated[dict[str, str | None] | None, Field(description=(
                             "Fields to set; merged with the current ones, null removes one."))] = None,
-                        project: str | None = None,
-                        no_project: bool = False, domain: str | None = None,
+                        parent: str | None = None,
+                        to_top: bool = False, domain: str | None = None,
                         body: str | None = None, base_revision: int | None = None) -> dict:
-        """Change a document's title, tags (replaces the list), fields, project, or domain
-        (moving needs edit rights on both). Replacing the whole body needs the
-        base_revision you read, and fails if someone wrote since."""
+        """Change a document's title, tags (replaces the list), fields, place in the
+        tree (parent: a page id or title path, in the target domain if moving; to_top
+        moves it to the top), or domain (moving needs edit rights on both; its child
+        pages go with it). Replacing the whole body needs the base_revision you read,
+        and fails if someone wrote since."""
         def go(s, user, actor):
             doc = writable(s, user, actor, document_id, access.WRITE)
             if body is not None and base_revision is None:
                 raise ToolError("replacing the body needs base_revision; or use edit_document")
             target = find_domain(s, user, domain, access.WRITE) if domain else None
             kw: dict = {}
-            if no_project:
-                kw["project"] = None
-            elif project:
-                kw["project"] = domains.find_project(s, target or doc.domain, project)
+            if to_top:
+                kw["parent"] = None
+            elif parent:
+                kw["parent"] = tree.resolve(s, target or doc.domain, parent)
             hints = tag_hints(s, target or doc.domain, tags)
             changed = documents.write(s, actor, doc, title=title, tags=tags, body=body,
                                       fields=fields,

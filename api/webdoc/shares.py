@@ -62,15 +62,17 @@ def revoke(s: Session, actor: Actor, link: ShareLink) -> None:
                f"revoked a read-only link to {doc.title}", doc.domain_id)
 
 
-def resolve(s: Session, token: str) -> Document:
-    """The document a token shows, counting the view. Trashed documents
-    aren't shown (the link works again if the document is restored)."""
+def resolve(s: Session, token: str, count: bool = True) -> Document:
+    """The document a token shows, counting the view (not for its images).
+    Trashed documents aren't shown (the link works again if the document is
+    restored)."""
     link = s.scalar(select(ShareLink).where(ShareLink.token == token)) if token else None
     doc = s.get(Document, link.document_id) if link else None
     if link is None or doc is None or doc.deleted_at is not None:
         raise access.Denied("this link doesn't exist or was revoked")
-    link.views += 1
-    link.last_viewed_at = utcnow()
+    if count:
+        link.views += 1
+        link.last_viewed_at = utcnow()
     return doc
 
 
