@@ -415,7 +415,7 @@ Phases, each a release with a review pause:
    general templating language.
 6. **Git mirrors (read-only)**: a domain mirrors a repo path (pull on a timer or webhook); its pages
    are read-only here with an "edit in repo" link, searchable over MCP. Opt-in per repo, personal
-   and private by default, never public; nothing under the workspace's private tree is mirrorable.
+   and private by default, and a mirrored domain can never be made public.
    Then an optional one-way git **backup** of wiki-native domains (the export format, committed on
    a schedule). No two-way sync.
 7. **nodewright embeds** (canvases by reference, rendered through nodewright's render path or a
