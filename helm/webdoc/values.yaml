@@ -35,7 +35,7 @@ oidc:
 # is hand-applied with keys S3_ACCESS_KEY / S3_SECRET_KEY. Leave s3Endpoint empty
 # to switch attachments off (the UI hides uploads; nothing else changes).
 attachments:
-  s3Endpoint: ""
+  s3Endpoint: http://192.168.0.10:30320
   bucket: webdoc
   secretName: webdoc-bucket-credentials
   maxBytes: 20971520
