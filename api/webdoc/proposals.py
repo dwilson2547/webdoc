@@ -128,7 +128,7 @@ def to_decide(s: Session, user: User) -> list[Proposal]:
     """Pending proposals this user can approve or reject."""
     keys = [f"user:{user.id}"]
     moderates = s.scalar(select(DomainGrant.id).where(DomainGrant.user_id == user.id,
-                                                      DomainGrant.role == "moderator"))
+                                                      DomainGrant.role.in_(("moderator", "admin"))))
     if user.is_admin or moderates:
         keys.append(PLATFORM)
     rows = s.scalars(select(Proposal).where(Proposal.status == "pending",

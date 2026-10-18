@@ -19,16 +19,19 @@ DELETE = "delete"                # move to trash, restore from trash
 PURGE = "purge"                  # delete permanently
 MANAGE = "manage"                # rename, describe or delete the domain itself
 GRANTS = "grants"                # give other people roles on the domain
-MODERATE = "moderate"            # hide, lock, mark duplicates, handle reports, contribution settings
+MODERATE = "moderate"            # hide, lock, mark duplicates, handle reports
+CONTRIBUTE = "contribute"        # post, reply and confirm in a forum
 
 ROLES: dict[str, frozenset[str]] = {
-    "admin": frozenset({READ, WRITE, DELETE, PURGE, MANAGE, GRANTS, MODERATE}),
-    "owner": frozenset({READ, WRITE, DELETE, PURGE, MANAGE, GRANTS, MODERATE}),
-    "moderator": frozenset({READ, WRITE, DELETE, GRANTS, MODERATE}),
-    "editor": frozenset({READ, WRITE, DELETE}),
+    "admin": frozenset({READ, WRITE, DELETE, PURGE, MANAGE, GRANTS, MODERATE, CONTRIBUTE}),
+    "owner": frozenset({READ, WRITE, DELETE, PURGE, MANAGE, GRANTS, MODERATE, CONTRIBUTE}),
+    "moderator": frozenset({READ, WRITE, DELETE, GRANTS, MODERATE, CONTRIBUTE}),
+    "editor": frozenset({READ, WRITE, DELETE, CONTRIBUTE}),
+    "contributor": frozenset({READ, CONTRIBUTE}),
     "reader": frozenset({READ}),
 }
-GRANTABLE = ("reader", "editor", "moderator")
+# A forum's roles, as the UI names them (design §16 phase 3).
+FORUM_ROLES = {"reader": "view", "contributor": "add", "moderator": "moderate", "admin": "admin"}
 
 
 class Denied(Exception):
@@ -45,6 +48,24 @@ def is_editor(user: User | None) -> bool:
     return user is not None and (user.is_admin or user.is_editor)
 
 
+def is_forum(d: Domain) -> bool:
+    """A forum is a domain that takes contributions: public (an admin's
+    domain, open to every editor) or private (a personal domain, open to its
+    owner and the members they add)."""
+    return bool(d.accepts_contributions)
+
+
+def moderated_here(d: Domain) -> bool:
+    """Whether a domain's own moderators handle its reports: public domains
+    and forums. Reports on other personal documents go to admins (§4)."""
+    return d.scope == "public" or is_forum(d)
+
+
+def role_name(d: Domain, role: str) -> str:
+    """A role as people read it: a forum's by what it lets you do."""
+    return FORUM_ROLES.get(role, role) if is_forum(d) else role
+
+
 def role_on(s: Session, user: User | None, d: Domain) -> str | None:
     """The user's role on a domain. A viewer's is capped at reader, wherever
     they own or were granted more (design §4)."""
@@ -56,8 +77,9 @@ def role_on(s: Session, user: User | None, d: Domain) -> str | None:
 
 def _role_on(s: Session, user: User | None, d: Domain) -> str | None:
     """Admins control public domains; personal domains are their owner's and
-    whoever they share with, admins included (design §4: admins review a
-    personal document only through a report, which is not built yet)."""
+    whoever they share with, admins included (admins review a personal
+    document only through a report). Everyone signed in may add to a public
+    forum unless a grant says otherwise."""
     if user is not None:
         if user.is_admin and d.scope == "public":
             return "admin"
@@ -67,6 +89,8 @@ def _role_on(s: Session, user: User | None, d: Domain) -> str | None:
             DomainGrant.domain_id == d.id, DomainGrant.user_id == user.id))
         if role:
             return role
+        if d.scope == "public" and is_forum(d):
+            return "contributor"
     return "reader" if d.scope == "public" else None
 
 
@@ -76,13 +100,18 @@ def can(s: Session, user: User | None, d: Domain, action: str) -> bool:
 
 
 def assignable(s: Session, user: User | None, d: Domain) -> list[str]:
-    """Roles this user may hand out on the domain. Moderators exist only on
-    public domains, and only owners and admins appoint them."""
+    """Roles this user may hand out on the domain. A forum's are view, add,
+    moderate and admin: moderators hand out the first two, owners and admins
+    all four. Elsewhere it is reader and editor, plus moderator on a public
+    domain for its owners and admins."""
     role = role_on(s, user, d)
     if role is None or GRANTS not in ROLES[role]:
         return []
+    top = role in ("admin", "owner")
+    if is_forum(d):
+        return ["reader", "contributor"] + (["moderator", "admin"] if top else [])
     out = ["reader", "editor"]
-    if d.scope == "public" and role in ("admin", "owner"):
+    if d.scope == "public" and top:
         out.append("moderator")
     return out
 
@@ -111,13 +140,14 @@ def can_see(user: User | None, doc: Document, role: str | None) -> bool:
 
 def doc_allows(user: User | None, doc: Document, role: str | None, action: str) -> bool:
     """The domain role, plus a contribution's author editing and trashing
-    their own (they need no role on a public domain); a moderator's lock
-    stops everyone but moderators."""
+    their own while they may still contribute; a moderator's lock stops
+    everyone but moderators."""
     if role is None:
         return False
     ok = action in ROLES[role]
     if not ok and doc.kind == "contribution" and user is not None \
-            and doc.created_by == user.id and action in (WRITE, DELETE):
+            and doc.created_by == user.id and action in (WRITE, DELETE) \
+            and CONTRIBUTE in ROLES[role]:
         ok = True
     if ok and action == WRITE and (doc.locked or doc.merged_into_id) \
             and MODERATE not in ROLES[role]:
@@ -144,14 +174,17 @@ def document(s: Session, user: User | None, doc_id: str, action: str = READ,
 
 
 def moderated_domain_ids(s: Session, user: User | None) -> list[str]:
-    if user is None:
+    """Public domains and forums this user moderates: by a moderator or admin
+    grant, as a forum's owner, or as an admin (every public domain)."""
+    if user is None or not is_editor(user):
         return []
-    q = select(Domain.id).where(Domain.id.in_(
-        select(DomainGrant.domain_id).where(DomainGrant.user_id == user.id,
-                                            DomainGrant.role == "moderator")))
+    granted = select(DomainGrant.domain_id).where(DomainGrant.user_id == user.id,
+                                                  DomainGrant.role.in_(("moderator", "admin")))
+    cond = or_(Domain.id.in_(granted),
+               and_(Domain.owner_user_id == user.id, Domain.accepts_contributions.is_(True)))
     if user.is_admin:
-        q = select(Domain.id).where(or_(Domain.scope == "public", Domain.id.in_(q)))
-    return list(s.scalars(q))
+        cond = or_(cond, Domain.scope == "public")
+    return list(s.scalars(select(Domain.id).where(cond)))
 
 
 def visible_documents(s: Session, user: User | None):

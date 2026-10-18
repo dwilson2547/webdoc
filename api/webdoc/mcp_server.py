@@ -70,13 +70,15 @@ the signed-in user who connected you, with their permissions.
   wait or tell the user rather than retrying in a loop. For a long series of edits to one
   document, lock_document first (the user sees it and can still take over) and
   unlock_document when done.
-- Public contribution domains (list_domains: accepts_contributions) are shared with everyone,
-  like a Q&A site. Before posting, search them (source="public"): if the issue is already
-  there, confirm the fix that worked or reply rather than posting a duplicate.
-  draft_contribution checks for duplicates first and only creates a draft; the user reads
-  and publishes it in the web UI, and replies work the same way. Never put private
-  details in a contribution or reply: no hostnames, IPs, internal paths, project names,
-  usernames or secrets. Generalise them ("a k3s cluster", "the API pod").
+- Forums are domains that take contributions, like a Q&A site (list_domains: forum is
+  "public" or "private", can_contribute says whether the user may post). Before posting,
+  search the forum: if the issue is already there, confirm the fix that worked or reply
+  rather than posting a duplicate. draft_contribution checks for duplicates first and only
+  creates a draft; the user reads and publishes it in the web UI, and replies work the same
+  way. A public forum is shared with everyone: never put private details in a contribution
+  or reply there (no hostnames, IPs, internal paths, project names, usernames or secrets;
+  generalise them: "a k3s cluster", "the API pod"). A private forum is seen only by its
+  members.
 - delete_document moves a document to the trash (restore_document brings it back).
   Don't delete what the user wrote unless asked.
 """
@@ -524,7 +526,7 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
                            body: str = "", type: str | None = None,
                            fields: dict[str, str] | None = None, tags: list[str] | None = None,
                            checked_duplicates: bool = False) -> dict:
-        """Draft a contribution to a public contribution domain. Only a draft: the user
+        """Draft a contribution to a forum (public or private). Only a draft: the user
         reads it and publishes it in the web UI. The first call looks for existing
         contributions on the same thing and, if it finds any, returns them without
         creating anything: confirm or reply to the one that matches. If none does, call
@@ -532,10 +534,10 @@ def build(db: Database, settings: Settings, indexer=None) -> tuple[MCPServer, AS
         pass type (get_template shows its sections) and its fields."""
         def go(s, user, actor):
             d = find_domain(s, user, domain)
-            contributions.check_draft(d, user, type)
+            contributions.check_draft(s, d, user, type)
             if not checked_duplicates:
                 emb = indexer.semantic if indexer is not None else None
-                dups = contributions.possible_duplicates(s, emb, d, title, body)
+                dups = contributions.possible_duplicates(s, emb, d, title, body, user)
                 if dups:
                     for x in dups:
                         x["url"] = url(x["id"])

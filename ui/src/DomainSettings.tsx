@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, errText, type DomainDetail, type DomainRevision, type Grant, type Me, type Role, type TemplateSpec } from "./api";
 import { navigate } from "./router";
-import { ROLE_TEXT, Modal } from "./util";
+import { Modal, roleText } from "./util";
 
 function General({ d, onChanged }: { d: DomainDetail; onChanged: () => void }) {
   const [name, setName] = useState(d.name);
@@ -62,9 +62,15 @@ function People({ d, me }: { d: DomainDetail; me: Me }) {
   return (
     <div className="stack">
       <p className="muted">
-        {d.scope === "public"
-          ? "Everyone can read a public domain. Editors can change anyone's documents; moderators also manage who is an editor."
-          : `Owned by ${owner}. Readers can read and search; editors can also write, and move things to the trash.`}
+        {d.forum
+          ? <>{d.forum === "public" ? "Everyone can read this forum and every editor can post in it; give View to stop one person posting."
+              : `A private forum owned by ${owner}: only the people listed here can see it.`}{" "}
+            View reads and reports; Add also posts, replies and confirms; Moderate also hides, locks and marks
+            duplicates, handles reports, edits the forum's own pages and gives View or Add; Admin also changes the
+            forum's settings and appoints moderators and admins.</>
+          : d.scope === "public"
+            ? "Everyone can read a public domain. Editors can change anyone's documents; moderators also manage who is an editor."
+            : `Owned by ${owner}. Readers can read and search; editors can also write, and move things to the trash.`}
       </p>
       <table className="grid">
         <tbody>
@@ -74,9 +80,9 @@ function People({ d, me }: { d: DomainDetail; me: Me }) {
               <td>
                 {assignable.includes(g.role) ? (
                   <select value={g.role} onChange={(e) => void act(api.setGrant(d.id, g.username, e.target.value as Role))}>
-                    {assignable.map((r) => <option key={r} value={r}>{ROLE_TEXT[r]}</option>)}
+                    {assignable.map((r) => <option key={r} value={r}>{roleText(r, d.forum)}</option>)}
                   </select>
-                ) : ROLE_TEXT[g.role]}
+                ) : roleText(g.role, d.forum)}
               </td>
               <td>{(assignable.includes(g.role) || g.user_id === me.id) &&
                 <button onClick={() => void act(api.removeGrant(d.id, g.user_id))}>Remove</button>}</td>
@@ -89,7 +95,7 @@ function People({ d, me }: { d: DomainDetail; me: Me }) {
         <form className="row" onSubmit={(e) => { e.preventDefault(); void act(api.setGrant(d.id, username.trim(), role)).then(() => setUsername("")); }}>
           <input placeholder="Username" value={username} onChange={(e) => setUsername(e.target.value)} />
           <select value={role} onChange={(e) => setRole(e.target.value as Role)}>
-            {assignable.map((r) => <option key={r} value={r}>{ROLE_TEXT[r]}</option>)}
+            {assignable.map((r) => <option key={r} value={r}>{roleText(r, d.forum)}</option>)}
           </select>
           <button type="submit" disabled={!username.trim()}>Add</button>
         </form>
@@ -118,10 +124,13 @@ function Contributions({ d, onChanged }: { d: DomainDetail; onChanged: () => voi
   return (
     <form className="stack" onSubmit={(e) => { e.preventDefault(); void save(); }}>
       <p className="muted">
-        Open to contributions, anyone signed in can post here, like a Q&amp;A site. Posts start as drafts their
-        author publishes after review (agents can only draft), pass a secret scan, and you moderate them.
+        A forum takes contributions, like a Q&amp;A site.{" "}
+        {d.scope === "public" ? "This one is public: everyone can read it and every editor can post."
+          : "This one is private: only you and the people you add under People can see it, each with View, Add, Moderate or Admin."}{" "}
+        Posts start as drafts their author publishes after review (agents can only draft), and pass a secret scan.
       </p>
-      <label className="check"><input type="checkbox" checked={accepts} onChange={(e) => setAccepts(e.target.checked)} />Accept contributions</label>
+      <label className="check"><input type="checkbox" checked={accepts} onChange={(e) => setAccepts(e.target.checked)} />
+        {d.scope === "public" ? "Public forum" : "Private forum"}</label>
       <div>
         <div className="muted">Accepted types (none ticked: any, including untyped)</div>
         {all.map((t) => (
@@ -154,19 +163,18 @@ export function DomainSettings({ domain, me, onClose, onChanged }: {
   domain: DomainDetail; me: Me; onClose: () => void; onChanged: () => void;
 }) {
   const manage = domain.can.includes("manage");
-  const moderate = domain.scope === "public" && domain.can.includes("moderate");
-  const [tab, setTab] = useState<"general" | "people" | "contributions" | "history">(manage ? "general" : "people");
+  const [tab, setTab] = useState<"general" | "people" | "forum" | "history">(manage ? "general" : "people");
   return (
     <Modal title={`${domain.name} settings`} onClose={onClose}>
       <div className="tabs">
         {manage && <button className={tab === "general" ? "on" : ""} onClick={() => setTab("general")}>General</button>}
         <button className={tab === "people" ? "on" : ""} onClick={() => setTab("people")}>People</button>
-        {moderate && <button className={tab === "contributions" ? "on" : ""} onClick={() => setTab("contributions")}>Contributions</button>}
+        {manage && <button className={tab === "forum" ? "on" : ""} onClick={() => setTab("forum")}>Forum</button>}
         {manage && <button className={tab === "history" ? "on" : ""} onClick={() => setTab("history")}>History</button>}
       </div>
       {tab === "general" && <General d={domain} onChanged={onChanged} />}
       {tab === "people" && <People d={domain} me={me} />}
-      {tab === "contributions" && <Contributions d={domain} onChanged={onChanged} />}
+      {tab === "forum" && <Contributions d={domain} onChanged={onChanged} />}
       {tab === "history" && <DomainHistory d={domain} />}
     </Modal>
   );

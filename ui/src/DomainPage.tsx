@@ -5,7 +5,7 @@ import { DomainSettings } from "./DomainSettings";
 import { ImportDialog, ImportSummary } from "./ImportDialog";
 import { PageTree, usePageTree } from "./PageTree";
 import { Link, navigate } from "./router";
-import { ROLE_TEXT, ago } from "./util";
+import { ago, roleText } from "./util";
 
 type Filters = { kind?: Kind; tag?: string; q?: string; trashed?: boolean };
 const PAGE = 50;
@@ -54,10 +54,11 @@ export function DomainPage({ id, me }: { id: string; me: Me | null }) {
 
   return (
     <div className="page domain-page">
-      <div className="crumbs"><Link to="/">Home</Link> › <span>{d.scope === "public" ? "Public" : "Personal"}</span></div>
+      <div className="crumbs"><Link to="/">Home</Link> › <span>{d.forum ? "Forums" : d.scope === "public" ? "Public" : "Personal"}</span></div>
       <div className="row domain-head">
         <h1>{d.name}</h1>
-        {d.role && <span className="badge">{ROLE_TEXT[d.role]}</span>}
+        {d.forum === "private" && <span className="badge">private forum</span>}
+        {d.role && <span className="badge">{roleText(d.role, d.forum)}</span>}
         <span className="grow" />
         {canWrite && <button className="primary" onClick={() => newDoc("document")}>New document</button>}
         {canWrite && <button onClick={() => newDoc("note")}>New note</button>}

@@ -185,7 +185,7 @@ export function DocumentPage({ id, me }: { id: string; me: Me | null }) {
   };
   const untrash = async () => setDoc(await api.untrash(doc.id));
   const report = async () => {
-    const reason = prompt(doc.domain_scope === "public"
+    const reason = prompt(doc.domain_moderated
       ? "What's wrong with it? Moderators read this."
       : "What's wrong with it? An admin reads this and may open this document (only this one) to review it.");
     if (!reason?.trim()) return;

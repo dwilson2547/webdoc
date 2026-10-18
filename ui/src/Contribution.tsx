@@ -226,7 +226,8 @@ export function ContributionThread({ doc, onDoc, onError }: { doc: Doc; onDoc: (
       </div>
       <h3>{t.replies.filter((r) => r.status === "published").length} replies</h3>
       <ul className="replies">{t.replies.map((r) => <ReplyItem key={r.id} doc={doc} r={r} onDoc={onDoc} onError={onError} />)}</ul>
-      {t.can.reply ? <ReplyForm doc={doc} onDoc={onDoc} /> : !t.locked && !t.merged_into && <p className="muted">Sign in to reply or confirm.</p>}
+      {t.can.reply ? <ReplyForm doc={doc} onDoc={onDoc} /> : !t.locked && !t.merged_into && <p className="muted">
+        {t.can.signed_in ? "You can read this forum but not post, reply or confirm in it." : "Sign in to reply or confirm."}</p>}
     </section>
   );
 }

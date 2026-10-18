@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.9.0 — 2026-10-17
+
+Forums, public and private: phase 3 of the dan-wiki merge (design §16).
+
+- A **forum** is a domain that takes contributions. Opening a public domain makes a public forum
+  (everyone reads, every editor posts); opening a personal domain makes a **private forum** that
+  only its owner and the members they add can see. Settings → **Forum** turns it on (the domain's
+  owner and admins; moderators no longer change it).
+- A forum's roles are **View** (read and report), **Add** (also post, reply and confirm),
+  **Moderate** (also hide, lock, mark duplicates, handle reports, edit the forum's own pages, give
+  View or Add) and **Admin** (also the forum's settings, appointing moderators and admins).
+  On a public forum, View takes posting away from one person.
+- Reports on a private forum go to its owner, moderators and admins; site admins don't see them.
+  Reports on other personal documents still go to site admins.
+- The home page lists forums in their own section; a private forum carries a badge.
+- MCP: `list_domains` says whether a domain is a public or private forum, `draft_contribution`
+  works in private forums (its duplicate check now searches as the user), and the guidance about
+  private details applies to public forums.
+- Fix: checkbox labels in settings forms sat above their box.
+
 ## 0.8.0 — 2026-10-17
 
 Archive import and a sync tool: phase 2 of the dan-wiki merge (design §16).

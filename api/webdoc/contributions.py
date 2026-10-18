@@ -63,9 +63,9 @@ def _since(name: str):
 # --- domain settings ------------------------------------------------------------
 
 def configure(s: Session, actor: Actor, d: Domain, accepts: bool, types: list[str]) -> Domain:
-    """Turn contributions on or off and set the accepted types (moderators)."""
-    if d.scope != "public":
-        raise ContribError("only public domains take contributions")
+    """Turn contributions on or off and set the accepted types (the domain's
+    owner or admins). A public domain becomes a public forum, a personal one a
+    private forum for its owner and members."""
     clean = []
     for t in dict.fromkeys((x or "").strip().lower() for x in types or []):
         if t:
@@ -80,10 +80,20 @@ def configure(s: Session, actor: Actor, d: Domain, accepts: bool, types: list[st
 
 
 VIEWER = "viewers can read and report; posting, replying and confirming need editor access"
+VIEW_ONLY = "you can read this forum but not post in it; its moderators can give you add"
 
 
-def can_contribute(user: User | None, d: Domain) -> bool:
-    return access.is_editor(user) and d.scope == "public" and d.accepts_contributions
+def can_contribute(s: Session, user: User | None, d: Domain) -> bool:
+    return access.is_forum(d) and access.can(s, user, d, access.CONTRIBUTE)
+
+
+def _may_contribute(s: Session, user: User, d: Domain) -> None:
+    if not access.is_editor(user):
+        raise ContribError(VIEWER)
+    if not access.is_forum(d):
+        raise ContribError(f"{d.name} doesn't take contributions")
+    if not can_contribute(s, user, d):
+        raise ContribError(VIEW_ONLY)
 
 
 # --- drafting and publishing ----------------------------------------------------
@@ -91,14 +101,14 @@ def can_contribute(user: User | None, d: Domain) -> bool:
 TITLE_OVERLAP = 0.5
 
 
-def possible_duplicates(s: Session, emb, d: Domain, title: str, body: str,
+def possible_duplicates(s: Session, emb, d: Domain, title: str, body: str, user: User | None,
                         exclude: str | None = None, limit: int = 5) -> list[dict]:
     """Published contributions in this domain that look like the same thing:
     search hits, plus titles sharing most of their words with this one (which
     catches posts the indexer hasn't reached yet)."""
     from . import search
     q = f"{title}\n{(body or '')[:500]}"
-    res = search.search(s, None, emb, q, search.Filters(domain_ids=[d.id], kind="contribution"),
+    res = search.search(s, user, emb, q, search.Filters(domain_ids=[d.id], kind="contribution"),
                         limit=limit + 1)
     out = [{"id": r["id"], "title": r["title"], "heading": r["heading"], "snippet": r["snippet"],
             "matched": r["matched"]} for r in res["results"] if r["id"] != exclude]
@@ -119,12 +129,9 @@ def possible_duplicates(s: Session, emb, d: Domain, title: str, body: str,
     return out[:limit]
 
 
-def check_draft(d: Domain, user: User, type: str | None) -> str | None:
+def check_draft(s: Session, d: Domain, user: User, type: str | None) -> str | None:
     """Whether this user may draft here with this type; returns the type."""
-    if not access.is_editor(user):
-        raise ContribError(VIEWER)
-    if not can_contribute(user, d):
-        raise ContribError(f"{d.name} doesn't take contributions")
+    _may_contribute(s, user, d)
     type = (type or "").strip().lower() or None
     if d.contribution_types and type not in d.contribution_types:
         raise ContribError(f"{d.name} takes contributions of type "
@@ -136,7 +143,7 @@ def check_draft(d: Domain, user: User, type: str | None) -> str | None:
 def draft(s: Session, actor: Actor, d: Domain, *, title: str, body: str = "",
           type: str | None = None, fields: dict | None = None, tags: list[str] | None = None,
           max_bytes: int = documents.DEFAULT_MAX_BYTES) -> Document:
-    type = check_draft(d, actor.user, type)
+    type = check_draft(s, d, actor.user, type)
     mine = (select(func.count()).select_from(Document)
             .where(Document.created_by == actor.user.id, Document.kind == "contribution",
                    Document.created_at > _since("draft_user")))
@@ -165,8 +172,9 @@ def publish(s: Session, actor: Actor, doc: Document, ack_warnings: bool = False)
         raise ContribError("only a draft contribution can be published")
     if doc.created_by != actor.user.id:
         raise access.Denied("only its author publishes a draft", 403)
-    if not can_contribute(actor.user, doc.domain):
+    if not access.is_forum(doc.domain):
         raise ContribError(f"{doc.domain.name} doesn't take contributions any more")
+    _may_contribute(s, actor.user, doc.domain)
     result = scan.check(scan_text(doc), ack_warnings)
     doc.status, doc.published_at = "published", utcnow()
     record(s, actor, "contribution.publish", "document", doc.id, f"published {doc.title}",
@@ -187,9 +195,8 @@ def check_edit(doc: Document, body: str | None, title: str | None, ack_warnings:
 
 # --- replies --------------------------------------------------------------------
 
-def _participant(user: User) -> None:
-    if not access.is_editor(user):
-        raise ContribError(VIEWER)
+def _participant(s: Session, user: User, doc: Document) -> None:
+    _may_contribute(s, user, doc.domain)
 
 
 def _open_for_discussion(doc: Document) -> None:
@@ -203,7 +210,7 @@ def _open_for_discussion(doc: Document) -> None:
 def add_reply(s: Session, actor: Actor, doc: Document, kind: str, body: str,
               publish_now: bool = False, ack_warnings: bool = False) -> Reply:
     """A reply; agents draft (publish_now is for the web UI, past the scan)."""
-    _participant(actor.user)
+    _participant(s, actor.user, doc)
     _open_for_discussion(doc)
     if kind not in REPLY_KINDS:
         raise ContribError("kind must be one of " + ", ".join(REPLY_KINDS))
@@ -251,7 +258,7 @@ def reply_for(s: Session, user: User, reply_id: str) -> tuple[Reply, Document]:
 
 def publish_reply(s: Session, actor: Actor, r: Reply, doc: Document,
                   ack_warnings: bool = False) -> dict:
-    _participant(actor.user)
+    _participant(s, actor.user, doc)
     if r.status != "draft":
         raise ContribError("only a draft reply can be published")
     if r.author_id != actor.user.id:
@@ -312,7 +319,7 @@ def accept(s: Session, actor: Actor, doc: Document, r: Reply | None) -> None:
 
 def confirm(s: Session, actor: Actor, doc: Document, r: Reply | None = None,
             environment: str = "") -> Confirmation:
-    _participant(actor.user)
+    _participant(s, actor.user, doc)
     _open_for_discussion(doc)
     if r is not None and (r.document_id != doc.id or r.status != "published"):
         raise ContribError("that reply isn't a published reply to this contribution")
@@ -415,12 +422,12 @@ def mark_duplicate(s: Session, actor: Actor, doc: Document, of: Document | None)
 
 def report(s: Session, actor: Actor, doc: Document, reason: str, r: Reply | None = None) -> Report:
     """Anyone who can read a published document can report it. Reports in a
-    public domain go to its moderators and admins; reports on a personal
-    domain's document go to admins, who may then open that one document
-    (design §4), and to nobody in the domain."""
+    public domain or a forum go to its moderators and admins; reports on
+    another personal domain's document go to admins, who may then open that
+    one document (design §4), and to nobody in the domain."""
     if doc.status == "draft":
         raise ContribError("drafts aren't public; there's nothing to report")
-    if doc.domain.scope != "public" and (doc.domain.owner_user_id == actor.user.id
+    if not access.moderated_here(doc.domain) and (doc.domain.owner_user_id == actor.user.id
                                          or doc.created_by == actor.user.id):
         raise ContribError("this is your own document")
     reason = (reason or "").strip()
@@ -438,12 +445,13 @@ def report(s: Session, actor: Actor, doc: Document, reason: str, r: Reply | None
 
 
 def _reports_for(s: Session, user: User):
-    """Reports this user handles: their moderated public domains', and as an
-    admin, those on personal documents too."""
+    """Reports this user handles: their moderated public domains' and
+    forums', and as an admin, those on other personal documents too."""
     ids = access.moderated_domain_ids(s, user)
     cond = Report.domain_id.in_(ids) if ids else None
     if user.is_admin:
-        personal = Report.domain_id.in_(select(Domain.id).where(Domain.scope != "public"))
+        personal = Report.domain_id.in_(select(Domain.id).where(
+            Domain.scope != "public", Domain.accepts_contributions.is_(False)))
         cond = personal if cond is None else or_(cond, personal)
     return cond
 
@@ -478,7 +486,7 @@ def report_for(s: Session, user: User, report_id: str) -> Report:
 
 
 def _may_handle(s: Session, user: User, doc: Document) -> None:
-    if doc.domain.scope == "public":
+    if access.moderated_here(doc.domain):
         _moderator(s, user, doc)
     elif not user.is_admin:
         raise access.Denied("only admins handle reports on personal documents", 403)
@@ -495,7 +503,7 @@ def review(s: Session, actor: Actor, rep: Report) -> dict:
     out = {"report": report_out(s, rep), "title": doc.title, "body": doc.body,
            "fields": dict(doc.fields or {}), "tags": doc.tags, "kind": doc.kind,
            "status": doc.status, "revision": doc.revision, "domain": doc.domain.name,
-           "scope": doc.domain.scope,
+           "scope": doc.domain.scope, "moderated": access.moderated_here(doc.domain),
            "owner": doc.domain.owner.username if doc.domain.owner else None,
            "updated_at": doc.updated_at.isoformat(), "reported": None}
     if rep.revision and rep.revision != doc.revision:
@@ -503,7 +511,7 @@ def review(s: Session, actor: Actor, rep: Report) -> dict:
                                                       DocumentRevision.revision == rep.revision))
         if old is not None:
             out["reported"] = {"revision": old.revision, "title": old.title, "body": old.body}
-    if doc.domain.scope != "public":
+    if not access.moderated_here(doc.domain):
         seen = s.scalar(select(Event.id).where(Event.action == "report.review",
                                                Event.actor_id == actor.user.id,
                                                Event.target_id == doc.id,
@@ -561,6 +569,7 @@ def report_out(s: Session, rep: Report) -> dict:
             "reason": rep.reason, "by": rep.reporter.username if rep.reporter else None,
             "status": rep.status, "created_at": rep.created_at.isoformat(),
             "scope": doc.domain.scope if doc else None, "note": rep.note,
+            "moderated": access.moderated_here(doc.domain) if doc else False,
             "decided_at": rep.decided_at.isoformat() if rep.decided_at else None}
 
 
@@ -598,7 +607,7 @@ def thread(s: Session, user: User | None, doc: Document) -> dict:
         if visible:
             replies.append(reply_out(r, by_target.get(r.id, []), user, moderator))
     merged = s.get(Document, doc.merged_into_id) if doc.merged_into_id else None
-    signed_in = access.is_editor(user)
+    signed_in = can_contribute(s, user, doc.domain)
     open_ = doc.status == "published" and not doc.locked and not doc.merged_into_id
     own = [c for c in by_target.get("", [])]
     return {
@@ -616,7 +625,8 @@ def thread(s: Session, user: User | None, doc: Document) -> dict:
                 "publish": doc.status == "draft" and signed_in and doc.created_by == user.id,
                 "accept": signed_in and (doc.created_by == user.id or moderator),
                 "moderate": moderator,
-                "report": user is not None and doc.status == "published"},
+                "report": user is not None and doc.status == "published",
+                "signed_in": user is not None},
     }
 
 

@@ -10,8 +10,8 @@ agents over an OAuth MCP server, so web chats and local agents read and write th
 owner keeps a closed taxonomy of domains that agents can use but not change; documents carry
 attributed revision history with diffs, named versions and a trash.
 
-Status: **0.8.0** at https://webdoc.danwils.com (phases 1-5, viewers and reports, page tree and
-attachments, archive import and a sync tool). Domains (personal and public) holding a page tree (any page can have child pages), file
+Status: **0.9.0** at https://webdoc.danwils.com (phases 1-5, viewers and reports, page tree and
+attachments, archive import and a sync tool, public and private forums). Domains (personal and public) holding a page tree (any page can have child pages), file
 attachments, tags, reader/editor/moderator grants with admins from an authentik group, signed-out
 reading of public domains, notes and documents with a Toast UI markdown editor, section-level
 edits for agents, history (who and through which app, diffs, named versions, restore), trash,

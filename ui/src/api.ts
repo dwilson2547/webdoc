@@ -51,17 +51,18 @@ export type Config = {
   oidc: boolean; dev_login: boolean; version: string; max_document_bytes: number;
   attachments: boolean; max_attachment_bytes: number;
 };
-export type Role = "admin" | "owner" | "moderator" | "editor" | "reader";
+export type Role = "admin" | "owner" | "moderator" | "editor" | "contributor" | "reader";
 export type Scope = "public" | "personal";
 export type Domain = {
   id: string; slug: string; name: string; description: string; scope: Scope; owner: string | null;
   role: Role | null; documents: number; last_activity: string;
   accepts_contributions: boolean; contribution_types: string[]; can_contribute: boolean;
+  forum: "public" | "private" | null;
 };
 export type DomainDetail = Domain & {
   can: string[]; assignable: Role[]; tags: string[]; contribution_type_names: Record<string, string>;
 };
-export type Home = { public: Domain[]; personal: Domain[]; shared: Domain[] };
+export type Home = { forums: Domain[]; public: Domain[]; personal: Domain[]; shared: Domain[] };
 export type Kind = "note" | "document" | "contribution";
 export type DocStatus = "published" | "draft" | "hidden";
 export type DocMeta = {
@@ -82,7 +83,7 @@ export type Thread = {
   status: DocStatus; locked: boolean; hidden_reason: string | null; published_at: string | null; author: string | null;
   merged_into: { id: string; title: string } | null; accepted_reply_id: string | null;
   confirmations: { by: string; environment: string; at: string }[]; confirmed_by_me: boolean; replies: ReplyT[];
-  can: { reply: boolean; confirm: boolean; publish: boolean; accept: boolean; moderate: boolean; report: boolean };
+  can: { reply: boolean; confirm: boolean; publish: boolean; accept: boolean; moderate: boolean; report: boolean; signed_in: boolean };
 };
 export type Counts = { drafts: number; proposals: number; reports: number; moderates: boolean };
 export type Drafts = {
@@ -92,11 +93,11 @@ export type Drafts = {
 export type ReportT = {
   id: string; document_id: string; title: string | null; domain_id: string; domain: string | null; reply_id: string | null;
   reply_excerpt: string | null; reason: string; by: string | null; status: string; created_at: string;
-  scope: "public" | "personal" | null; note: string; decided_at: string | null;
+  scope: "public" | "personal" | null; moderated: boolean; note: string; decided_at: string | null;
 };
 export type ReportReview = {
   report: ReportT; title: string; body: string; fields: Record<string, string>; tags: string[]; kind: Kind; status: DocStatus;
-  revision: number; domain: string; scope: string; owner: string | null; updated_at: string;
+  revision: number; domain: string; scope: string; moderated: boolean; owner: string | null; updated_at: string;
   reported: { revision: number; title: string; body: string } | null;
 };
 export type FieldDef = { name: string; description: string; required: boolean };
@@ -109,6 +110,7 @@ export type TemplateSpec = {
 export type TemplateCheck = { missing_sections: string[]; missing_fields: string[] };
 export type Doc = DocMeta & {
   body: string; role: Role | null; can_edit: boolean; can_delete: boolean; can_purge: boolean; domain_scope: Scope;
+  domain_moderated: boolean;
   lease: Lease | null; can_share: boolean; contribution?: Thread; can_report: boolean; hidden_reason: string | null;
   template?: (TemplateSpec & { check: TemplateCheck }) | null;
   children: { id: string; title: string; kind: Kind; type: string | null; updated_at: string }[];

@@ -69,18 +69,19 @@ def test_scan_blocks_secrets_and_flags_private_details():
 
 # --- drafts and publishing ------------------------------------------------------
 
-def test_only_moderators_open_a_domain_to_contributions(forum):
+def test_only_owners_and_admins_open_a_domain_to_contributions(forum):
     app, provider, admin, d, bob, alice = forum
     assert bob.patch(f"/api/domains/{d['id']}/contributions", json={"accepts": False},
                      headers=H).status_code == 403
-    mine = bob.get("/api/home").json()["personal"][0]
-    assert bob.patch(f"/api/domains/{mine['id']}/contributions", json={"accepts": True},
-                     headers=H).status_code == 422
     assert bob.get(f"/api/domains/{d['id']}").json()["can_contribute"] is True
     # A contribution needs a domain that takes them.
+    mine = bob.get("/api/home").json()["personal"][0]
     r = bob.post("/api/documents", json={"domain_id": mine["id"], "kind": "contribution",
                                          "title": "x", "body": "y"}, headers=H)
     assert r.status_code == 422
+    # Opening a personal domain makes it a private forum (test_forums.py).
+    r = bob.patch(f"/api/domains/{mine['id']}/contributions", json={"accepts": True}, headers=H)
+    assert r.status_code == 200 and r.json()["forum"] == "private"
 
 
 def test_accepted_types_are_enforced(forum):
@@ -109,7 +110,7 @@ def test_a_draft_is_its_authors_alone_until_published(forum):
         assert c.get("/api/search", params={"q": "Traefik", "mode": "find"}).json()["results"] == []
         titles = [e["title"] for e in c.get("/api/activity").json()["events"]]
         assert "Traefik 404 after cert renewal" not in titles
-    assert admin.get("/api/home").json()["public"][0]["documents"] == 0
+    assert admin.get("/api/home").json()["forums"][0]["documents"] == 0
     # The author sees it everywhere, and in their drafts.
     assert bob.get(f"/api/documents?domain={d['id']}").json()["total"] == 1
     assert bob.get("/api/search", params={"q": "Traefik", "mode": "find"}).json()["results"]

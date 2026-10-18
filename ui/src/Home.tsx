@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, errText, type Domain, type Home as HomeData, type Me, type Scope } from "./api";
 import { ActivityList } from "./Activity";
 import { Link, navigate } from "./router";
-import { ROLE_TEXT, ago, Modal } from "./util";
+import { ago, Modal, roleText } from "./util";
 
 function DomainCard({ d }: { d: Domain }) {
   return (
@@ -12,7 +12,9 @@ function DomainCard({ d }: { d: Domain }) {
       <div className="card-meta muted">
         {d.documents} {d.documents === 1 ? "item" : "items"} · {ago(d.last_activity)}
         {d.owner && d.scope === "personal" && d.role !== "owner" && <> · {d.owner}'s</>}
-        {d.role && d.role !== "reader" && d.role !== "owner" && <span className="badge">{ROLE_TEXT[d.role]}</span>}
+        {d.forum === "private" && <span className="badge">private</span>}
+        {d.role && !["reader", "owner"].includes(d.role) && !(d.forum === "public" && d.role === "contributor") &&
+          <span className="badge">{roleText(d.role, d.forum)}</span>}
       </div>
     </Link>
   );
@@ -75,6 +77,9 @@ export function Home({ me }: { me: Me | null }) {
   if (!data) return <p className="muted">Loading…</p>;
   return (
     <div className="page">
+      {data.forums.length > 0 && (
+        <Section title="Forums" hint="ask, answer and share fixes" domains={data.forums} empty="" />
+      )}
       <Section title="Public" hint="open to everyone" domains={data.public} empty="No public domains yet."
         action={me?.is_admin && <button onClick={() => setCreating("public")}>New public domain</button>} />
       {me && me.is_editor && (

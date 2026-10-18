@@ -229,16 +229,15 @@ def resolve(s: Session, d: Domain, type_: str) -> Spec:
 def can_manage(s: Session, user: User | None, owner_key: str, d: Domain | None) -> bool:
     """Who may create or change templates for an owner (and optionally one of
     its domains): the user for their own, admins for public ones, and a public
-    domain's moderators for that domain's."""
+    domain's or forum's moderators and admins for that domain's."""
     if not access.is_editor(user):
         return False
-    if owner_key == f"user:{user.id}":
-        return d is None or d.owner_key == owner_key
-    if owner_key == PLATFORM:
-        if user.is_admin:
-            return True
-        return d is not None and access.role_on(s, user, d) == "moderator"
-    return False
+    if owner_key == f"user:{user.id}" and (d is None or d.owner_key == owner_key):
+        return True
+    if owner_key == PLATFORM and user.is_admin:
+        return True
+    return (d is not None and d.owner_key == owner_key
+            and access.role_on(s, user, d) in ("moderator", "admin"))
 
 
 def _snapshot(s: Session, t: Template, actor: Actor) -> None:

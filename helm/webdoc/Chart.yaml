@@ -3,4 +3,4 @@ name: webdoc
 description: Shared notes and documents with an OAuth MCP server, signed in through authentik
 type: application
 version: 0.3.0
-appVersion: "0.8.0"
+appVersion: "0.9.0"

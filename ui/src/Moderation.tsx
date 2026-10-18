@@ -4,8 +4,8 @@ import { MarkdownView } from "./markdown";
 import { Link } from "./router";
 import { ago, Modal } from "./util";
 
-// Reports for the domains this person moderates; admins also get reports on
-// personal documents (design §4). A personal document can't be browsed by an
+// Reports for the domains and forums this person moderates; admins also get
+// reports on other personal documents (design §4). A personal document can't be browsed by an
 // admin: Review opens just that one, while the report is open, and the owner
 // sees in their activity that it was opened.
 
@@ -20,7 +20,7 @@ function Review({ report, onClose }: { report: ReportT; onClose: () => void }) {
       {data && <>
         <p className="muted">
           {data.scope === "public" ? data.domain : `${data.owner}'s ${data.domain}`} · revision {data.revision}, updated {ago(data.updated_at)}
-          {data.scope !== "public" && " · opening this is recorded in the owner's activity"}
+          {!data.moderated && " · opening this is recorded in the owner's activity"}
         </p>
         {data.reported && (
           <div className="banner">
@@ -56,17 +56,17 @@ export function ModerationPage({ onCount }: { onCount: () => void }) {
     <div className="page narrow">
       <div className="crumbs"><Link to="/">Home</Link></div>
       <h1>Moderation</h1>
-      <p className="muted">Open reports in the domains you moderate{" "}
-        and, for admins, on personal documents, which you can only open from here.</p>
+      <p className="muted">Open reports in the domains and forums you moderate{" "}
+        and, for admins, on other personal documents, which you can only open from here.</p>
       {error && <p className="error">{error}</p>}
       {reports && reports.length === 0 && <p className="muted">Nothing reported.</p>}
       <ul className="docs">
         {reports?.map((r) => (
           <li key={r.id}>
             <div className="row">
-              {r.scope === "public" ? <Link to={`/d/${r.document_id}`} className="doc-title">{r.title}</Link>
+              {r.moderated ? <Link to={`/d/${r.document_id}`} className="doc-title">{r.title}</Link>
                 : <span className="doc-title">{r.title}</span>}
-              <span className="muted">{r.reply_id ? "· a reply" : ""} · {r.scope === "public" ? r.domain : "personal document"}</span>
+              <span className="muted">{r.reply_id ? "· a reply" : ""} · {r.moderated ? r.domain : "personal document"}</span>
               <span className="grow" />
               <button onClick={() => setReviewing(r)}>Review</button>
               <button onClick={() => void resolve(r, "dismiss")}>Dismiss</button>

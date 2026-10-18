@@ -129,8 +129,9 @@ def out(s: Session, d: Domain, user: User | None, stats=None) -> dict:
             "role": access.role_on(s, user, d), "documents": n,
             "accepts_contributions": d.accepts_contributions,
             "contribution_types": list(d.contribution_types or []),
-            "can_contribute": (access.is_editor(user) and d.scope == "public"
-                               and d.accepts_contributions),
+            "forum": ("public" if d.scope == "public" else "private") if access.is_forum(d) else None,
+            "can_contribute": (access.is_editor(user) and access.is_forum(d)
+                               and access.can(s, user, d, access.CONTRIBUTE)),
             "last_activity": (last or d.updated_at).isoformat()}
 
 
@@ -157,7 +158,7 @@ def set_grant(s: Session, actor: Actor, d: Domain, target: User, role: str) -> D
     else:
         row.role, row.granted_by = role, actor.user.id
     s.flush()
-    record(s, actor, "grant.set", "domain", d.id, f"{target.username} is now {role} on {d.name}", d.id)
+    record(s, actor, "grant.set", "domain", d.id, f"{target.username} is now {access.role_name(d, role)} on {d.name}", d.id)
     return row
 
 

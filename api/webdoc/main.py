@@ -412,9 +412,10 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         """Domains grouped the way the home page shows them (design §11)."""
         ds = access.visible_domains(s, user)
         stats = domains.counts(s, [d.id for d in ds])
-        groups: dict[str, list] = {"public": [], "personal": [], "shared": []}
+        groups: dict[str, list] = {"forums": [], "public": [], "personal": [], "shared": []}
         for d in ds:
-            key = ("public" if d.scope == "public"
+            key = ("forums" if access.is_forum(d)
+                   else "public" if d.scope == "public"
                    else "personal" if user is not None and d.owner_user_id == user.id else "shared")
             groups[key].append(domains.out(s, d, user, stats))
         return groups
@@ -473,7 +474,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         o["assignable"] = access.assignable(s, user, d)
         o["contribution_type_names"] = (
             {t: templates.resolve(s, d, t).name for t in d.contribution_types or []}
-            if d.scope == "public" else {})
+            if access.is_forum(d) else {})
         o["tags"] = sorted(tagmod.in_domain(s, d.id))
         return o
 
@@ -685,6 +686,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         o["can_delete"] = access.DELETE in access.ROLES.get(role or "", ())
         o["can_purge"] = access.PURGE in access.ROLES.get(role or "", ())
         o["domain_scope"] = doc.domain.scope
+        o["domain_moderated"] = access.moderated_here(doc.domain)
         o["lease"] = leases.describe(leases.active(s, doc.id))
         o["can_share"] = (doc.domain.scope != "public"
                           and access.GRANTS in access.ROLES.get(role or "", ()))
@@ -695,7 +697,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
         # Readers may report what they can see, except their own work.
         o["can_report"] = (user is not None and doc.status == "published"
                            and doc.created_by != user.id
-                           and not (doc.domain.scope != "public"
+                           and not (not access.moderated_here(doc.domain)
                                     and doc.domain.owner_user_id == user.id))
         o["hidden_reason"] = doc.hidden_reason if doc.status == "hidden" else None
         if doc.kind == "contribution":
@@ -992,7 +994,7 @@ def create_app(settings: Settings | None = None, provider: oidc.Provider | None 
     @app.patch("/api/domains/{domain_id}/contributions")
     def contribution_settings(domain_id: str, body: ContribSettingsIn,
                               user: User = Depends(user_dep), s: Session = Depends(session)):
-        d = guard(access.domain, s, user, domain_id, access.MODERATE)
+        d = guard(access.domain, s, user, domain_id, access.MANAGE)
         guard(contributions.configure, s, actor_for(user), d, body.accepts, body.types)
         return domain_detail(s, d, user)
 

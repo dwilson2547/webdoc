@@ -93,9 +93,11 @@ signed-out visitors can read public domains (below). Four roles:
   The platform role is a ceiling: a viewer's role on any domain is at most reader, so demoting
   someone freezes their own domains read-only (still exportable) and promoting them gives them a
   "Notes" domain. Unset `EDITOR_GROUP` makes everyone an editor. Synced at every sign-in.
+- **Forums** ✅ 0.9.0: a domain that takes contributions, public or private, with its own role
+  names (view / add / moderate / admin); see §16 phase 3.
 - **Reports and admin review** ✅ 0.6.0: anyone who can read a published document may report it
-  (not its owner or author). Public-domain reports go to that domain's moderators and admins;
-  personal-domain reports go to admins only. An admin still has no access to personal domains
+  (not its owner or author). Public-domain and forum reports go to that domain's moderators and
+  admins (a private forum's owner included); other personal-domain reports go to admins only. An admin still has no access to personal domains
   (above) except `GET /api/reports/{id}/review`: that one document, current and as reported,
   while the report is open, recorded in the owner's activity once per admin and report. Hiding
   leaves it visible to the owner (with the reason); recent decisions can be undone.
@@ -397,9 +399,16 @@ Phases, each a release with a review pause:
    export, manifest and import only.
    📐 Later (user, 2026-10-17): a separate sync-token kind scoped to chosen domains, instead of
    the one token per user.
-3. **Private forums and per-forum roles**: a forum is a contribution-enabled domain that is public
-   or private (named members); roles per forum are view / add / moderate / admin. No orgs or
-   groups above the domain (§14 phase 6 stays dropped).
+3. ✅ 0.9.0 **Private forums and per-forum roles**: a forum is a domain that takes contributions
+   (`access.is_forum`). A public domain becomes a public forum: everyone reads, every editor gets
+   **add** without a grant (a **view** grant takes it away). A personal domain becomes a private
+   forum: its owner and named members only; any editor can make one (user, 2026-10-17). Roles:
+   view = `reader`, add = `contributor` (new: read + the `contribute` action), moderate =
+   `moderator`, admin = `admin`; moderators grant view/add, owners and admins all four. Turning a
+   forum on or off is `manage` (owner, admins), no longer `moderate`. Reports on a private forum go
+   to its owner, moderators and admins, never site admins (`access.moderated_here`). The viewer
+   ceiling (§4) still holds: viewers only read and report. No orgs or groups above the domain (§14
+   phase 6 stays dropped); no schema change.
 4. **Posts as shared documents** (replaces §12's contribution documents, drafts and replies):
    - A person writes a document in their own space and **shares it to a forum**. The post points
      at a **published revision**, never at the latest edit; publishing an update is an explicit

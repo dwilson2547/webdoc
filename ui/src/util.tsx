@@ -54,5 +54,14 @@ export function Diff({ text }: { text: string }) {
 }
 
 export const ROLE_TEXT: Record<string, string> = {
-  admin: "Admin", owner: "Owner", moderator: "Moderator", editor: "Editor", reader: "Reader",
+  admin: "Admin", owner: "Owner", moderator: "Moderator", editor: "Editor", contributor: "Contributor", reader: "Reader",
 };
+
+// A forum names its roles for what they let you do (design §16 phase 3).
+const FORUM_ROLE_TEXT: Record<string, string> = {
+  admin: "Admin", owner: "Owner", moderator: "Moderate", editor: "Editor", contributor: "Add", reader: "View",
+};
+
+export function roleText(role: string, forum: string | null | undefined): string {
+  return (forum ? FORUM_ROLE_TEXT : ROLE_TEXT)[role] ?? role;
+}
